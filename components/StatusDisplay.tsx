@@ -1,4 +1,3 @@
-
 import React, { useEffect, useRef } from 'react';
 
 interface StatusDisplayProps {
@@ -66,14 +65,14 @@ export const StatusDisplay: React.FC<StatusDisplayProps> = ({ status, transcript
     useEffect(() => {
         if (messageRef.current) {
             const element = messageRef.current;
-            // Вызываем плавную прокрутку с длительностью 500 мс (полсекунды)
-            smoothScrollTo(element, element.scrollHeight, 1000);
+            // Вызываем плавную прокрутку с длительностью 1500 мс (1.5 секунды)
+            smoothScrollTo(element, element.scrollHeight, 1500);
         }
     }, [message]);
 
 
     return (
-        <div className="w-full h-20 landscape:h-16 p-2 bg-black bg-opacity-70 rounded-lg text-center flex items-center justify-center">
+        <div className="w-full h-24 p-2 bg-black bg-opacity-70 rounded-lg text-center flex items-center justify-center">
             <p 
                 ref={messageRef}
                 className="text-lg text-high-contrast-fg font-medium break-words max-h-full overflow-y-auto no-scrollbar"

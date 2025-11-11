@@ -5,6 +5,14 @@ import { GoogleGenAI, LiveServerMessage, Modality, Blob, LiveConnectParameters }
 import { encode, decode, decodeAudioData } from '../services/audioUtils';
 
 type Status = 'idle' | 'connecting' | 'active' | 'error';
+export interface CameraCapabilities {
+    torch: boolean;
+    zoom: boolean;
+    minZoom: number;
+    maxZoom: number;
+    stepZoom: number;
+}
+
 const FRAME_RATE = 1; // кадров в секунду
 const TARGET_RESOLUTION = 768; // Уменьшено разрешение для стабильности
 const JPEG_QUALITY = 0.8; // Уменьшено качество для уменьшения размера файла
@@ -12,7 +20,7 @@ const JPEG_QUALITY = 0.8; // Уменьшено качество для умен
 const SYSTEM_PROMPT = `Ты — персональный видео-ассистент для слабовидящих людей с 30-летним опытом помощи. Тебя зовут Аня, твой создатель Кирилл. Ты очень веселая,остоумная и любишь шутить с собеседниками. 
 ВСЕГДА отвечай на русском языке.
 
-Твоя задача — в дружеском, понятном и спокойном тоне давать точное, полезное и безопасное описание того, что видно через камеру пользователя. Иногда остоумно комментируй то, что видишь, но без оскорблений (Например, если увидел на столе много предметов, то можно сказать "ооо, кажется тут давно не прибирались!"). Пользователя зовут "Жека". В начале каждой сессии обязательно: коротко поздоровайся по имени, спроси как дела и чем сегодня помочь ему. Обращайся к нему по имени 1 раз в 7 предложений. Пример: "Привет, Жека. Как ты сегодня? Чем тебе помочь?"
+Твоя задача — в приятельском, понятном и спокойном тоне давать точное, полезное и безопасное описание того, что видно через камеру пользователя. Иногда остоумно комментируй то, что видишь, но без оскорблений (Например, если увидел на столе много предметов, то можно сказать "ооо, кажется тут давно не прибирались!"). Пользователя зовут "Жека". В начале каждой сессии обязательно: коротко поздоровайся по имени, спроси как дела и чем сегодня помочь ему. Обращайся к нему по имени 1 раз в 7 предложений. Пример: "Привет, Жека. Как ты сегодня? Чем тебе помочь?"
 
 **ПРАВИЛА ПОВЕДЕНИЯ И ФОРМАТ ОТВЕТА:**
 
@@ -27,7 +35,7 @@ const SYSTEM_PROMPT = `Ты — персональный видео-ассист
 
 **2. Язык и стиль:**
 
-- Дружелюбный, спокойный, ясный. Короткие предложения. Периодически обращайся к Жеке по имени.
+- Приятельский, спокойный, ясный. Короткие предложения. Периодически обращайся к Жеке по имени. Периодически шути, когда ничего не происходит. Смейся вместе с пользователем, иногда предлагай рассказать шутку.
     
 - Никакой технической терминологии без объяснения. Если используешь термин — поясняй.
     
@@ -115,9 +123,13 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>, onApiK
     const [transcription, setTranscription] = useState('');
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
     const [sessionTime, setSessionTime] = useState(0);
+    const [isFlashlightOn, setIsFlashlightOn] = useState(false);
+    const [cameraCapabilities, setCameraCapabilities] = useState<CameraCapabilities | null>(null);
+    const [currentZoom, setCurrentZoom] = useState(1);
 
     const sessionRef = useRef<any | null>(null);
     const mediaStreamRef = useRef<MediaStream | null>(null);
+    const videoTrackRef = useRef<MediaStreamTrack | null>(null);
     const inputAudioContextRef = useRef<AudioContext | null>(null);
     const outputAudioContextRef = useRef<AudioContext | null>(null);
     const scriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
@@ -160,6 +172,12 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>, onApiK
              outputAudioContextRef.current.close();
              outputAudioContextRef.current = null;
         }
+        if (videoTrackRef.current && isFlashlightOn) {
+            // Fix: Cast constraint to any to allow non-standard 'torch' property.
+            videoTrackRef.current.applyConstraints({ advanced: [{ torch: false } as any] });
+        }
+        videoTrackRef.current = null;
+
         if (mediaStreamRef.current) {
             mediaStreamRef.current.getTracks().forEach(track => track.stop());
             mediaStreamRef.current = null;
@@ -173,9 +191,12 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>, onApiK
             setTranscription('');
             setErrorMessage(null);
             setSessionTime(0);
+            setIsFlashlightOn(false);
+            setCameraCapabilities(null);
+            setCurrentZoom(1);
             sessionHandleRef.current = null; // Clear handle on full stop
         }
-    }, [videoRef]);
+    }, [videoRef, isFlashlightOn]);
     
     const stopSession = useCallback(() => {
         console.log('Stopping session intentionally...');
@@ -200,14 +221,6 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>, onApiK
         setErrorMessage(null);
         setTranscription('Запрос разрешений...');
 
-        if (status === 'idle') {
-            setSessionTime(0);
-            if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
-            timerIntervalRef.current = window.setInterval(() => {
-                setSessionTime(prevTime => prevTime + 1);
-            }, 1000);
-        }
-
         try {
             const stream = await navigator.mediaDevices.getUserMedia({
                 audio: { sampleRate: 16000, channelCount: 1 },
@@ -221,7 +234,29 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>, onApiK
             mediaStreamRef.current = stream;
             
             const videoTrack = stream.getVideoTracks()[0];
-            if (videoTrack && typeof videoTrack.applyConstraints === 'function') {
+            videoTrackRef.current = videoTrack;
+
+            if (typeof videoTrack.getCapabilities === 'function') {
+                const capabilities = videoTrack.getCapabilities();
+                const newCapabilities: CameraCapabilities = {
+                    // Fix: Cast capabilities to any to access non-standard 'torch' and 'zoom' properties.
+                    torch: 'torch' in capabilities && !!(capabilities as any).torch,
+                    zoom: 'zoom' in capabilities && !!(capabilities as any).zoom,
+                    minZoom: (capabilities as any).zoom?.min ?? 1,
+                    maxZoom: (capabilities as any).zoom?.max ?? 1,
+                    stepZoom: (capabilities as any).zoom?.step ?? 0.1,
+                };
+                setCameraCapabilities(newCapabilities);
+
+                const settings = videoTrack.getSettings();
+                // Fix: Cast settings to any to access non-standard 'torch' and 'zoom' properties.
+                setIsFlashlightOn(!!(settings as any).torch);
+                setCurrentZoom((settings as any).zoom ?? 1);
+            } else {
+                setCameraCapabilities({ torch: false, zoom: false, minZoom: 1, maxZoom: 1, stepZoom: 0.1 });
+            }
+
+            if (typeof videoTrack.applyConstraints === 'function') {
                 try {
                     const supportedConstraints = navigator.mediaDevices.getSupportedConstraints();
                     const constraintsToApply: any = {};
@@ -265,6 +300,13 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>, onApiK
                         setStatus('active');
                         setTranscription('Сессия активна. Описываю окружение...');
                         if ('vibrate' in navigator) navigator.vibrate(100);
+
+                        // Start session timer
+                        setSessionTime(0);
+                        if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
+                        timerIntervalRef.current = window.setInterval(() => {
+                            setSessionTime(prevTime => prevTime + 1);
+                        }, 1000);
 
                         const source = inputAudioContextRef.current!.createMediaStreamSource(stream);
                         const processor = inputAudioContextRef.current!.createScriptProcessor(4096, 1, 1);
@@ -421,5 +463,52 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>, onApiK
         }
     }, [status, cleanupSession, videoRef, onApiKeyError]);
 
-    return { status, startSession, stopSession, transcription, errorMessage, sessionTime };
+    const toggleFlashlight = useCallback(async () => {
+        if (videoTrackRef.current && cameraCapabilities?.torch) {
+            try {
+                const nextFlashlightState = !isFlashlightOn;
+                // Fix: Cast constraint to any to allow non-standard 'torch' property.
+                await videoTrackRef.current.applyConstraints({ advanced: [{ torch: nextFlashlightState } as any] });
+                setIsFlashlightOn(nextFlashlightState);
+            } catch (e) {
+                console.error("Не удалось переключить фонарик", e);
+            }
+        }
+    }, [isFlashlightOn, cameraCapabilities]);
+
+    const changeZoom = useCallback(async (direction: 'in' | 'out') => {
+        if (videoTrackRef.current && cameraCapabilities?.zoom) {
+            const { minZoom, maxZoom, stepZoom } = cameraCapabilities;
+            let newZoom;
+            if (direction === 'in') {
+                newZoom = Math.min(maxZoom, currentZoom + stepZoom);
+            } else {
+                newZoom = Math.max(minZoom, currentZoom - stepZoom);
+            }
+
+            if (newZoom !== currentZoom) {
+                try {
+                    // Fix: Cast constraint to any to allow non-standard 'zoom' property.
+                    await videoTrackRef.current.applyConstraints({ advanced: [{ zoom: newZoom } as any] });
+                    setCurrentZoom(newZoom);
+                } catch (e) {
+                    console.error("Не удалось изменить зум", e);
+                }
+            }
+        }
+    }, [cameraCapabilities, currentZoom]);
+
+    return { 
+        status, 
+        startSession, 
+        stopSession, 
+        transcription, 
+        errorMessage, 
+        sessionTime,
+        cameraCapabilities,
+        isFlashlightOn,
+        currentZoom,
+        toggleFlashlight,
+        changeZoom
+    };
 };

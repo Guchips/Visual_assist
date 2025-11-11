@@ -4,12 +4,24 @@ import { useVisionAssistant } from './hooks/useVisionAssistant';
 import { ActionButton } from './components/ActionButton';
 import { StatusDisplay } from './components/StatusDisplay';
 import { SettingsScreen } from './components/SettingsScreen';
+import { CameraControls } from './components/CameraControls';
 
-const GearIcon: React.FC = () => (
-    <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-    </svg>
+interface GearIconProps {
+    showNotification?: boolean;
+}
+
+const GearIcon: React.FC<GearIconProps> = ({ showNotification = false }) => (
+    <div className="relative">
+        <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+        </svg>
+        {showNotification && (
+            <div className="absolute top-0 right-0 -mt-1 -mr-1 w-5 h-5 bg-red-600 rounded-full border-2 border-black flex items-center justify-center">
+                <span className="text-white text-xs font-bold">!</span>
+            </div>
+        )}
+    </div>
 );
 
 
@@ -38,6 +50,11 @@ const App: React.FC = () => {
         transcription, 
         errorMessage,
         sessionTime,
+        cameraCapabilities,
+        isFlashlightOn,
+        currentZoom,
+        toggleFlashlight,
+        changeZoom,
     } = useVisionAssistant(videoRef, handleApiKeyError);
 
     useEffect(() => {
@@ -86,7 +103,7 @@ const App: React.FC = () => {
                     className="text-high-contrast-accent focus:outline-none focus:ring-2 focus:ring-yellow-300 rounded-full p-1 transition-transform transform active:scale-90"
                     aria-label="Настройки API ключа"
                 >
-                    <GearIcon />
+                    <GearIcon showNotification={!apiKeySelected} />
                 </button>
             </header>
 
@@ -94,7 +111,7 @@ const App: React.FC = () => {
             <div className="flex-grow flex flex-col landscape:flex-row gap-2 overflow-hidden">
                 
                 {/* Video Container */}
-                <div className="h-[45%] w-full flex items-center justify-center overflow-hidden landscape:w-[55%] landscape:h-full">
+                <div className="relative h-[45%] w-full flex items-center justify-center overflow-hidden landscape:w-[55%] landscape:h-full">
                     <video
                         ref={videoRef}
                         autoPlay
@@ -102,11 +119,20 @@ const App: React.FC = () => {
                         muted
                         className="max-w-full max-h-full object-contain"
                     ></video>
+                    {status === 'active' && cameraCapabilities && (
+                        <CameraControls
+                            capabilities={cameraCapabilities}
+                            isFlashlightOn={isFlashlightOn}
+                            currentZoom={currentZoom}
+                            onToggleFlashlight={toggleFlashlight}
+                            onChangeZoom={changeZoom}
+                        />
+                    )}
                 </div>
                 
                 {/* Controls Container */}
-                <div className="h-[55%] w-full flex flex-col items-center landscape:w-[45%] landscape:h-full landscape:justify-center landscape:gap-2">
-                    <main className="flex-grow flex flex-col items-center justify-center landscape:flex-grow-0">
+                <div className="h-[55%] w-full flex flex-col items-center justify-center landscape:w-[45%] landscape:h-full landscape:justify-center landscape:gap-2">
+                    <main className="flex flex-col items-center justify-center landscape:flex-grow-0 mb-5">
                         <ActionButton
                             status={status}
                             onClick={handleAction}
