@@ -1,5 +1,4 @@
 
-
 import { useState, useRef, useCallback, RefObject } from 'react';
 // Fix: Use LiveConnectParameters for ai.live.connect options.
 import { GoogleGenAI, LiveServerMessage, Modality, Blob, LiveConnectParameters } from '@google/genai';
@@ -111,7 +110,7 @@ const SYSTEM_PROMPT = `Ты — персональный видео-ассист
 **Следуй этим правилам постоянно. Если появится конфликт между правилами, приоритет у пунктов в том порядке, в котором они перечислены (безопасность всегда первична).**`;
 
 
-export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>) => {
+export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>, onApiKeyError: () => void) => {
     const [status, setStatus] = useState<Status>('idle');
     const [transcription, setTranscription] = useState('');
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -185,20 +184,23 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>) => {
     }, [cleanupSession]);
 
     const startSession = useCallback(async () => {
-        // Prevent starting a new session if one is already connecting or active
         if (status === 'connecting' || status === 'active') {
             return;
         }
         isIntentionalStopRef.current = false;
 
-        // Fix: Per coding guidelines, API key must be obtained from process.env.API_KEY.
-        // The UI for managing API key is removed.
+        const apiKey = localStorage.getItem('gemini-api-key');
+        if (!apiKey) {
+            setErrorMessage('API-ключ не предоставлен. Пожалуйста, введите его в настройках (значок ⚙️).');
+            setStatus('error');
+            return;
+        }
 
         setStatus('connecting');
         setErrorMessage(null);
         setTranscription('Запрос разрешений...');
 
-        if (status === 'idle') { // Only reset timer on a fresh start
+        if (status === 'idle') {
             setSessionTime(0);
             if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
             timerIntervalRef.current = window.setInterval(() => {
@@ -240,16 +242,14 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>) => {
             if (videoRef.current) {
                 videoRef.current.srcObject = stream;
             }
-
-            // Fix: Per coding guidelines, API key must be obtained from process.env.API_KEY.
-            const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+            
+            const ai = new GoogleGenAI({ apiKey });
 
             inputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
             outputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
             
             setTranscription('Подключение к Gemini...');
             
-            // Fix: Use `LiveConnectParameters` for the connection options object, which corrects the type mismatch.
             const connectOptions: LiveConnectParameters = {
                 model: 'gemini-2.5-flash-native-audio-preview-09-2025',
                 config: {
@@ -317,8 +317,6 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>) => {
                             sessionHandleRef.current = message.sessionResumptionUpdate.newHandle;
                         }
 
-                        // Fix: Property 'goAway' does not exist on type 'LiveServerContent'. This logic is removed.
-
                         if (message.serverContent?.outputTranscription?.text) {
                             setTranscription(prev => prev + message.serverContent.outputTranscription.text);
                         }
@@ -360,10 +358,10 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>) => {
                         const errorEvent = e as ErrorEvent;
                         let msg = errorEvent.message || "Произошла неизвестная ошибка.";
                         
-                        if (msg.includes('API key not valid')) {
-                            // Fix: Update error message as settings screen for API key is removed.
-                            msg = 'Неверный API ключ.';
-                            isIntentionalStopRef.current = true; // This is fatal
+                        if (msg.includes('API key not valid') || msg.includes('API_KEY_INVALID') || msg.includes('API key is invalid')) {
+                            msg = 'Ваш API-ключ недействителен. Пожалуйста, введите новый ключ в настройках (значок ⚙️).';
+                            onApiKeyError();
+                            isIntentionalStopRef.current = true;
                             setErrorMessage(msg);
                             setStatus('error');
                             cleanupSession(true);
@@ -397,7 +395,7 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>) => {
             };
             
             if (sessionHandleRef.current) {
-                connectOptions.sessionResumption = { handle: sessionHandleRef.current };
+                (connectOptions as any).sessionResumption = { handle: sessionHandleRef.current };
                 console.log('Attempting to resume session with handle.');
             } else {
                 console.log('Starting a new session.');
@@ -411,6 +409,9 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>) => {
             let message = err instanceof Error ? err.message : String(err);
             if (message.toLowerCase().includes('network')) {
                 message = 'Сетевая ошибка. Проверьте интернет и отключите блокировщики рекламы.';
+            } else if (message.includes('API key not valid')) {
+                 message = 'Ваш API-ключ недействителен. Пожалуйста, введите новый ключ в настройках.';
+                 onApiKeyError();
             } else {
                  message = `Не удалось запустить сессию: ${message}`;
             }
@@ -418,7 +419,7 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>) => {
             setStatus('error');
             cleanupSession(true);
         }
-    }, [status, cleanupSession, videoRef]);
+    }, [status, cleanupSession, videoRef, onApiKeyError]);
 
     return { status, startSession, stopSession, transcription, errorMessage, sessionTime };
 };

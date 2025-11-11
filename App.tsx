@@ -1,11 +1,35 @@
 
-import React, { useRef } from 'react';
+import React, { useRef, useState, useEffect } from 'react';
 import { useVisionAssistant } from './hooks/useVisionAssistant';
 import { ActionButton } from './components/ActionButton';
 import { StatusDisplay } from './components/StatusDisplay';
+import { SettingsScreen } from './components/SettingsScreen';
+
+const GearIcon: React.FC = () => (
+    <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+    </svg>
+);
+
 
 const App: React.FC = () => {
     const videoRef = useRef<HTMLVideoElement>(null);
+    const [apiKeySelected, setApiKeySelected] = useState(false);
+    const [showSettings, setShowSettings] = useState(false);
+
+    const checkApiKey = () => {
+        const key = localStorage.getItem('gemini-api-key');
+        const hasKey = !!key && key.length > 0;
+        setApiKeySelected(hasKey);
+        return hasKey;
+    };
+
+    const handleApiKeyError = () => {
+        localStorage.removeItem('gemini-api-key');
+        setApiKeySelected(false);
+        setShowSettings(true);
+    };
 
     const { 
         status, 
@@ -14,16 +38,26 @@ const App: React.FC = () => {
         transcription, 
         errorMessage,
         sessionTime,
-    } = useVisionAssistant(videoRef);
+    } = useVisionAssistant(videoRef, handleApiKeyError);
+
+    useEffect(() => {
+        checkApiKey();
+    }, []);
     
-    const handleAction = () => {
+    const handleAction = async () => {
         if (status === 'active') {
             stopSession();
-        } else {
-            // Fix: Per coding guidelines, API key is handled by `useVisionAssistant` hook using process.env.API_KEY.
-            // No need to check for API key here or open settings.
-            startSession();
+        } else if (status === 'idle' || status === 'error') {
+            if (checkApiKey()) {
+                startSession();
+            } else {
+                setShowSettings(true);
+            }
         }
+    };
+
+    const handleSaveKey = () => {
+        checkApiKey();
     };
 
     const formatTime = (seconds: number) => {
@@ -36,10 +70,24 @@ const App: React.FC = () => {
     return (
         <div className="bg-high-contrast-bg text-high-contrast-fg w-full h-screen flex flex-col p-2 gap-2 touch-none">
             
+            {showSettings && (
+                <SettingsScreen 
+                    onClose={() => setShowSettings(false)}
+                    onSave={handleSaveKey}
+                />
+            )}
+
             {/* Header - Always on top */}
-            <header className="w-full text-center py-2 relative flex-shrink-0">
+            <header className="w-full text-center py-2 relative flex-shrink-0 flex justify-between items-center px-4">
+                <div className="w-8 h-8"></div> {/* Spacer for centering title */}
                 <h1 className="text-2xl md:text-3xl font-bold text-high-contrast-accent">Ассистент</h1>
-                {/* Fix: Removed settings button as API key is now handled by environment variables. */}
+                <button
+                    onClick={() => setShowSettings(true)}
+                    className="text-high-contrast-accent focus:outline-none focus:ring-2 focus:ring-yellow-300 rounded-full p-1 transition-transform transform active:scale-90"
+                    aria-label="Настройки API ключа"
+                >
+                    <GearIcon />
+                </button>
             </header>
 
             {/* Main Content Area */}
@@ -76,6 +124,7 @@ const App: React.FC = () => {
                             status={status}
                             transcription={transcription}
                             error={errorMessage}
+                            apiKeySelected={apiKeySelected}
                         />
                     </footer>
                 </div>

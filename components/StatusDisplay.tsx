@@ -1,9 +1,11 @@
+
 import React, { useEffect, useRef } from 'react';
 
 interface StatusDisplayProps {
     status: 'idle' | 'connecting' | 'active' | 'error';
     transcription: string;
     error: string | null;
+    apiKeySelected: boolean;
 }
 
 const smoothScrollTo = (element: HTMLElement, to: number, duration: number) => {
@@ -37,12 +39,15 @@ const smoothScrollTo = (element: HTMLElement, to: number, duration: number) => {
     requestAnimationFrame(animateScroll);
 };
 
-export const StatusDisplay: React.FC<StatusDisplayProps> = ({ status, transcription, error }) => {
+export const StatusDisplay: React.FC<StatusDisplayProps> = ({ status, transcription, error, apiKeySelected }) => {
     const messageRef = useRef<HTMLParagraphElement>(null);
 
     const getMessage = () => {
         if (error) {
             return `Ошибка: ${error}`;
+        }
+        if (!apiKeySelected && (status === 'idle' || status === 'error')) {
+            return 'Для начала работы выберите API-ключ. Нажмите на значок ⚙️ в правом верхнем углу.';
         }
         switch (status) {
             case 'idle':
