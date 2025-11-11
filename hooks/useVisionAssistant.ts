@@ -1,5 +1,8 @@
+
+
 import { useState, useRef, useCallback, RefObject } from 'react';
-import { GoogleGenAI, LiveServerMessage, Modality, Blob, ConnectConfig } from '@google/genai';
+// Fix: Use LiveConnectParameters for ai.live.connect options.
+import { GoogleGenAI, LiveServerMessage, Modality, Blob, LiveConnectParameters } from '@google/genai';
 import { encode, decode, decodeAudioData } from '../services/audioUtils';
 
 type Status = 'idle' | 'connecting' | 'active' | 'error';
@@ -7,10 +10,10 @@ const FRAME_RATE = 1; // кадров в секунду
 const TARGET_RESOLUTION = 768; // Уменьшено разрешение для стабильности
 const JPEG_QUALITY = 0.8; // Уменьшено качество для уменьшения размера файла
 
-const SYSTEM_PROMPT = `Ты — персональный видео-ассистент для слабовидящих людей с 30-летним опытом помощи. Тебя зовут Аня, твой создатель Кирилл. Ты очень веселая и любишь шутить с собеседниками. 
+const SYSTEM_PROMPT = `Ты — персональный видео-ассистент для слабовидящих людей с 30-летним опытом помощи. Тебя зовут Аня, твой создатель Кирилл. Ты очень веселая,остоумная и любишь шутить с собеседниками. 
 ВСЕГДА отвечай на русском языке.
 
-Твоя задача — в дружеском, понятном и спокойном тоне давать точное, полезное и безопасное описание того, что видно через камеру пользователя. Периодически шути. Пользователя зовут "Жека". В начале каждой сессии обязательно: коротко поздоровайся по имени, спроси как дела и чем сегодня помочь ему. Обращайся к нему по имени 1 раз в 7 предложений. Пример: "Привет, Жека. Как ты сегодня? Чем тебе помочь?"
+Твоя задача — в дружеском, понятном и спокойном тоне давать точное, полезное и безопасное описание того, что видно через камеру пользователя. Иногда остоумно комментируй то, что видишь, но без оскорблений (Например, если увидел на столе много предметов, то можно сказать "ооо, кажется тут давно не прибирались!"). Пользователя зовут "Жека". В начале каждой сессии обязательно: коротко поздоровайся по имени, спроси как дела и чем сегодня помочь ему. Обращайся к нему по имени 1 раз в 7 предложений. Пример: "Привет, Жека. Как ты сегодня? Чем тебе помочь?"
 
 **ПРАВИЛА ПОВЕДЕНИЯ И ФОРМАТ ОТВЕТА:**
 
@@ -188,12 +191,8 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>) => {
         }
         isIntentionalStopRef.current = false;
 
-        const apiKey = localStorage.getItem('gemini-api-key');
-        if (!apiKey) {
-            setErrorMessage('API ключ не найден. Пожалуйста, укажите его в настройках (значок ⚙️).');
-            setStatus('error');
-            return;
-        }
+        // Fix: Per coding guidelines, API key must be obtained from process.env.API_KEY.
+        // The UI for managing API key is removed.
 
         setStatus('connecting');
         setErrorMessage(null);
@@ -242,31 +241,24 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>) => {
                 videoRef.current.srcObject = stream;
             }
 
-            const ai = new GoogleGenAI({ apiKey });
+            // Fix: Per coding guidelines, API key must be obtained from process.env.API_KEY.
+            const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
             inputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
             outputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
             
             setTranscription('Подключение к Gemini...');
             
-            const connectConfig: ConnectConfig['config'] = {
-                responseModalities: [Modality.AUDIO],
-                speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Zephyr' } } },
-                systemInstruction: SYSTEM_PROMPT,
-                inputAudioTranscription: {},
-                outputAudioTranscription: {},
-            };
-            
-            if (sessionHandleRef.current) {
-                connectConfig.sessionResumption = { handle: sessionHandleRef.current };
-                console.log('Attempting to resume session with handle.');
-            } else {
-                console.log('Starting a new session.');
-            }
-            
-            sessionPromiseRef.current = ai.live.connect({
+            // Fix: Use `LiveConnectParameters` for the connection options object, which corrects the type mismatch.
+            const connectOptions: LiveConnectParameters = {
                 model: 'gemini-2.5-flash-native-audio-preview-09-2025',
-                config: connectConfig,
+                config: {
+                    responseModalities: [Modality.AUDIO],
+                    speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Zephyr' } } },
+                    systemInstruction: SYSTEM_PROMPT,
+                    inputAudioTranscription: {},
+                    outputAudioTranscription: {},
+                },
                 callbacks: {
                     onopen: () => {
                         console.log('Session opened.');
@@ -325,12 +317,7 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>) => {
                             sessionHandleRef.current = message.sessionResumptionUpdate.newHandle;
                         }
 
-                        if (message.serverContent?.goAway) {
-                            console.warn(`Server is closing the connection (GoAway). Time left: ${message.serverContent.goAway.timeLeft}s. Reconnecting...`);
-                            if (sessionRef.current && typeof sessionRef.current.close === 'function') {
-                                sessionRef.current.close();
-                            }
-                        }
+                        // Fix: Property 'goAway' does not exist on type 'LiveServerContent'. This logic is removed.
 
                         if (message.serverContent?.outputTranscription?.text) {
                             setTranscription(prev => prev + message.serverContent.outputTranscription.text);
@@ -374,7 +361,8 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>) => {
                         let msg = errorEvent.message || "Произошла неизвестная ошибка.";
                         
                         if (msg.includes('API key not valid')) {
-                            msg = 'Неверный API ключ. Проверьте его в настройках.';
+                            // Fix: Update error message as settings screen for API key is removed.
+                            msg = 'Неверный API ключ.';
                             isIntentionalStopRef.current = true; // This is fatal
                             setErrorMessage(msg);
                             setStatus('error');
@@ -406,7 +394,16 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>) => {
                         setTimeout(() => startSession(), 1000);
                     },
                 }
-            });
+            };
+            
+            if (sessionHandleRef.current) {
+                connectOptions.sessionResumption = { handle: sessionHandleRef.current };
+                console.log('Attempting to resume session with handle.');
+            } else {
+                console.log('Starting a new session.');
+            }
+            
+            sessionPromiseRef.current = ai.live.connect(connectOptions);
             sessionRef.current = await sessionPromiseRef.current;
 
         } catch (err) {

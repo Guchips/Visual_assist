@@ -62,7 +62,7 @@ export const StatusDisplay: React.FC<StatusDisplayProps> = ({ status, transcript
         if (messageRef.current) {
             const element = messageRef.current;
             // Вызываем плавную прокрутку с длительностью 500 мс (полсекунды)
-            smoothScrollTo(element, element.scrollHeight, 500);
+            smoothScrollTo(element, element.scrollHeight, 1000);
         }
     }, [message]);
 
