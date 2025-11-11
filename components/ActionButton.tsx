@@ -35,11 +35,12 @@ export const ActionButton: React.FC<ActionButtonProps> = ({ status, onClick }) =
             onClick={onClick}
             disabled={status === 'connecting'}
             className={`
-                w-48 h-48 md:w-64 md:h-64 
+                w-40 h-40 landscape:w-36 landscape:h-36 md:w-48 md:h-48 
                 rounded-full 
                 border-8 border-high-contrast-accent 
                 bg-black bg-opacity-50
-                text-high-contrast-accent text-4xl md:text-5xl font-bold
+                text-3xl md:text-4xl font-bold
+                text-high-contrast-accent
                 flex items-center justify-center
                 focus:outline-none focus:ring-4 focus:ring-yellow-300
                 transition-transform transform active:scale-95

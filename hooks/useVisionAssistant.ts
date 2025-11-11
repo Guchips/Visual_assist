@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, RefObject } from 'react';
-import { GoogleGenAI, LiveServerMessage, Modality, Blob } from '@google/genai';
+import { GoogleGenAI, LiveServerMessage, Modality, Blob, ConnectConfig } from '@google/genai';
 import { encode, decode, decodeAudioData } from '../services/audioUtils';
 
 type Status = 'idle' | 'connecting' | 'active' | 'error';
@@ -124,30 +124,35 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>) => {
     const audioSourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
     const nextAudioStartTimeRef = useRef<number>(0);
     const sessionPromiseRef = useRef<Promise<any> | null>(null);
+    const sessionHandleRef = useRef<string | null>(null);
+    const isIntentionalStopRef = useRef(false);
 
-    const stopSession = useCallback(() => {
-        console.log('Stopping session...');
+    const cleanupSession = useCallback((isFullStop: boolean) => {
+        console.log(`Cleaning up session. Full stop: ${isFullStop}`);
+        
         if (frameIntervalRef.current) {
             clearInterval(frameIntervalRef.current);
             frameIntervalRef.current = null;
         }
-        if (timerIntervalRef.current) {
+        if (isFullStop && timerIntervalRef.current) {
             clearInterval(timerIntervalRef.current);
             timerIntervalRef.current = null;
         }
         if (sessionRef.current) {
-            sessionRef.current.close();
+             if (typeof sessionRef.current.close === 'function') {
+                sessionRef.current.close();
+            }
             sessionRef.current = null;
         }
         if (scriptProcessorRef.current) {
             scriptProcessorRef.current.disconnect();
             scriptProcessorRef.current = null;
         }
-        if (inputAudioContextRef.current) {
+         if (inputAudioContextRef.current && inputAudioContextRef.current.state !== 'closed') {
             inputAudioContextRef.current.close();
             inputAudioContextRef.current = null;
         }
-        if (outputAudioContextRef.current) {
+        if (outputAudioContextRef.current && outputAudioContextRef.current.state !== 'closed') {
              audioSourcesRef.current.forEach(source => source.stop());
              audioSourcesRef.current.clear();
              outputAudioContextRef.current.close();
@@ -161,14 +166,27 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>) => {
             videoRef.current.srcObject = null;
         }
         
-        setStatus('idle');
-        setTranscription('');
-        setErrorMessage(null);
-        setSessionTime(0);
+        if (isFullStop) {
+            setStatus('idle');
+            setTranscription('');
+            setErrorMessage(null);
+            setSessionTime(0);
+            sessionHandleRef.current = null; // Clear handle on full stop
+        }
     }, [videoRef]);
+    
+    const stopSession = useCallback(() => {
+        console.log('Stopping session intentionally...');
+        isIntentionalStopRef.current = true;
+        cleanupSession(true);
+    }, [cleanupSession]);
 
     const startSession = useCallback(async () => {
-        if (status !== 'idle' && status !== 'error') return;
+        // Prevent starting a new session if one is already connecting or active
+        if (status === 'connecting' || status === 'active') {
+            return;
+        }
+        isIntentionalStopRef.current = false;
 
         const apiKey = localStorage.getItem('gemini-api-key');
         if (!apiKey) {
@@ -181,11 +199,13 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>) => {
         setErrorMessage(null);
         setTranscription('Запрос разрешений...');
 
-        setSessionTime(0);
-        if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
-        timerIntervalRef.current = window.setInterval(() => {
-            setSessionTime(prevTime => prevTime + 1);
-        }, 1000);
+        if (status === 'idle') { // Only reset timer on a fresh start
+            setSessionTime(0);
+            if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
+            timerIntervalRef.current = window.setInterval(() => {
+                setSessionTime(prevTime => prevTime + 1);
+            }, 1000);
+        }
 
         try {
             const stream = await navigator.mediaDevices.getUserMedia({
@@ -229,15 +249,24 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>) => {
             
             setTranscription('Подключение к Gemini...');
             
+            const connectConfig: ConnectConfig['config'] = {
+                responseModalities: [Modality.AUDIO],
+                speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Zephyr' } } },
+                systemInstruction: SYSTEM_PROMPT,
+                inputAudioTranscription: {},
+                outputAudioTranscription: {},
+            };
+            
+            if (sessionHandleRef.current) {
+                connectConfig.sessionResumption = { handle: sessionHandleRef.current };
+                console.log('Attempting to resume session with handle.');
+            } else {
+                console.log('Starting a new session.');
+            }
+            
             sessionPromiseRef.current = ai.live.connect({
                 model: 'gemini-2.5-flash-native-audio-preview-09-2025',
-                config: {
-                    responseModalities: [Modality.AUDIO],
-                    speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Zephyr' } } },
-                    systemInstruction: SYSTEM_PROMPT,
-                    inputAudioTranscription: {},
-                    outputAudioTranscription: {}
-                },
+                config: connectConfig,
                 callbacks: {
                     onopen: () => {
                         console.log('Session opened.');
@@ -291,6 +320,18 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>) => {
                         }, 1000 / FRAME_RATE);
                     },
                     onmessage: async (message: LiveServerMessage) => {
+                        if (message.sessionResumptionUpdate?.resumable) {
+                            console.log('Session handle updated. Resumable:', message.sessionResumptionUpdate.resumable);
+                            sessionHandleRef.current = message.sessionResumptionUpdate.newHandle;
+                        }
+
+                        if (message.serverContent?.goAway) {
+                            console.warn(`Server is closing the connection (GoAway). Time left: ${message.serverContent.goAway.timeLeft}s. Reconnecting...`);
+                            if (sessionRef.current && typeof sessionRef.current.close === 'function') {
+                                sessionRef.current.close();
+                            }
+                        }
+
                         if (message.serverContent?.outputTranscription?.text) {
                             setTranscription(prev => prev + message.serverContent.outputTranscription.text);
                         }
@@ -331,20 +372,38 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>) => {
                         console.error('Session error:', e);
                         const errorEvent = e as ErrorEvent;
                         let msg = errorEvent.message || "Произошла неизвестная ошибка.";
+                        
                         if (msg.includes('API key not valid')) {
                             msg = 'Неверный API ключ. Проверьте его в настройках.';
-                        } else if (msg.toLowerCase().includes('network error')) {
-                            msg = 'Ошибка сети. Проверьте подключение к интернету.';
+                            isIntentionalStopRef.current = true; // This is fatal
+                            setErrorMessage(msg);
+                            setStatus('error');
+                            cleanupSession(true);
+                            return;
                         }
+
+                        if (msg.toLowerCase().includes('network error')) {
+                            msg = 'Сетевая ошибка. Проверьте интернет и отключите блокировщики рекламы.';
+                        }
+
+                        if (sessionHandleRef.current) {
+                            console.warn("Error with session handle, clearing it for reconnection attempt.");
+                            sessionHandleRef.current = null;
+                        }
+                        
                         setErrorMessage(msg);
                         setStatus('error');
-                        stopSession();
                     },
                     onclose: () => {
                         console.log('Session closed.');
-                        if (status !== 'error') {
-                           stopSession();
+                        if (isIntentionalStopRef.current) {
+                            console.log('Closure was intentional, not reconnecting.');
+                            return;
                         }
+                        
+                        console.log('Unexpected closure. Attempting to reconnect...');
+                        cleanupSession(false);
+                        setTimeout(() => startSession(), 1000);
                     },
                 }
             });
@@ -352,12 +411,17 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>) => {
 
         } catch (err) {
             console.error('Failed to start session:', err);
-            const message = err instanceof Error ? err.message : String(err);
-            setErrorMessage(`Не удалось запустить сессию: ${message}`);
+            let message = err instanceof Error ? err.message : String(err);
+            if (message.toLowerCase().includes('network')) {
+                message = 'Сетевая ошибка. Проверьте интернет и отключите блокировщики рекламы.';
+            } else {
+                 message = `Не удалось запустить сессию: ${message}`;
+            }
+            setErrorMessage(message);
             setStatus('error');
-            stopSession();
+            cleanupSession(true);
         }
-    }, [status, stopSession, videoRef]);
+    }, [status, cleanupSession, videoRef]);
 
     return { status, startSession, stopSession, transcription, errorMessage, sessionTime };
 };
