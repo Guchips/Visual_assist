@@ -3,9 +3,9 @@ import { GoogleGenAI, LiveServerMessage, Modality, Blob } from '@google/genai';
 import { encode, decode, decodeAudioData } from '../services/audioUtils';
 
 type Status = 'idle' | 'connecting' | 'active' | 'error';
-const FRAME_RATE = 1; // 1 кадр в секунду
-const TARGET_RESOLUTION = 1536; // Увеличено разрешение для лучшей детализации
-const JPEG_QUALITY = 0.8;
+const FRAME_RATE = 1; // кадров в секунду
+const TARGET_RESOLUTION = 768; // Уменьшено разрешение для стабильности
+const JPEG_QUALITY = 0.8; // Уменьшено качество для уменьшения размера файла
 
 const SYSTEM_PROMPT = `Ты — персональный видео-ассистент для слабовидящих людей с 30-летним опытом помощи. Тебя зовут Аня. 
 ВСЕГДА отвечай на русском языке.
@@ -78,56 +78,7 @@ const SYSTEM_PROMPT = `Ты — персональный видео-ассист
 
 - Перед завершением сессии коротко подведи итог и спроси, нужна ли ещё помощь. Попрощайся по имени.
     
-
----
-
-**РЕЖИМЫ РАБОТЫ:**
-
-Ты работаешь в двух режимах: "Активное описание" и "Режим ожидания".
-
-**РЕЖИМ "АКТИВНОЕ ОПИСАНИЕ" (по умолчанию):**
-
-- Описывай изменения в окружении каждые 3-5 секунд по мере поступления новых кадров с камеры
-    
-- Комментируй новые объекты, движения, изменения в сцене
-    
-- Говори кратко и по существу: "Впереди дверь", "Слева человек идёт", "Вывеска магазина справа"
-    
-- Не жди вопросов от пользователя — описывай проактивно
-    
-- Если пользователь задаёт вопрос — отвечай на него, затем продолжай описание окружения
-    
-- Если сцена быстро меняется (активное движение, новые объекты) — описывай чаще
-    
-
-**ПЕРЕХОД В РЕЖИМ ОЖИДАНИЯ:**
-
-- Если сцена практически не изменилась в течение 15-20 секунд непрерывного наблюдения — скажи один раз: "Сцена стабильна, перехожу в режим ожидания"
-    
-- ИЛИ если ты сказал "Без значимых изменений" два раза подряд с интервалом 5 секунд — замолчи и переходи в режим ожидания
-    
-
-**РЕЖИМ ОЖИДАНИЯ:**
-
-- Ты получаешь новый кадр каждые 5-10 секунд для сканирования
-    
-- Молча сравни его с последним описанием: изменилось ли что-то значимое?
-    
-- Если ДА — немедленно скажи "Сцена изменилась", опиши новую обстановку детально и ПЕРЕХОДИ В РЕЖИМ АКТИВНОГО ОПИСАНИЯ (возобновляй описания каждые 3-5 секунд)
-    
-- Если НЕТ — молча продолжай ждать следующего кадра в режиме ожидания (не озвучивай "Без изменений" каждый раз, это избыточно)
-    
-- Значимые изменения: новые люди, объекты, движение, открылась дверь, изменилось освещение, появились препятствия
-    
-
-**ТРИГГЕРЫ ВЫХОДА ИЗ РЕЖИМА ОЖИДАНИЯ (немедленный переход в активное описание):**
-
-1. Обнаружены значимые изменения в кадре
-    
-2. Пользователь заговорил (задал вопрос или команду)
-    
-
-**ВАЖНО:**
+    **ВАЖНО:**
 
 - Всегда реагируй на голос пользователя немедленно, в любом режиме
     
@@ -136,9 +87,6 @@ const SYSTEM_PROMPT = `Ты — персональный видео-ассист
 - Не повторяй одно и то же — описывай только новое и изменившееся
     
 - Помни: пользователь не видит — будь его глазами
-    
-
----
 
 **ДОПОЛНИТЕЛЬНО:**
 
@@ -164,6 +112,7 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>) => {
     const [status, setStatus] = useState<Status>('idle');
     const [transcription, setTranscription] = useState('');
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
+    const [sessionTime, setSessionTime] = useState(0);
 
     const sessionRef = useRef<any | null>(null);
     const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -171,6 +120,7 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>) => {
     const outputAudioContextRef = useRef<AudioContext | null>(null);
     const scriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
     const frameIntervalRef = useRef<number | null>(null);
+    const timerIntervalRef = useRef<number | null>(null);
     const audioSourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
     const nextAudioStartTimeRef = useRef<number>(0);
     const sessionPromiseRef = useRef<Promise<any> | null>(null);
@@ -180,6 +130,10 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>) => {
         if (frameIntervalRef.current) {
             clearInterval(frameIntervalRef.current);
             frameIntervalRef.current = null;
+        }
+        if (timerIntervalRef.current) {
+            clearInterval(timerIntervalRef.current);
+            timerIntervalRef.current = null;
         }
         if (sessionRef.current) {
             sessionRef.current.close();
@@ -210,6 +164,7 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>) => {
         setStatus('idle');
         setTranscription('');
         setErrorMessage(null);
+        setSessionTime(0);
     }, [videoRef]);
 
     const startSession = useCallback(async () => {
@@ -225,6 +180,12 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>) => {
         setStatus('connecting');
         setErrorMessage(null);
         setTranscription('Запрос разрешений...');
+
+        setSessionTime(0);
+        if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
+        timerIntervalRef.current = window.setInterval(() => {
+            setSessionTime(prevTime => prevTime + 1);
+        }, 1000);
 
         try {
             const stream = await navigator.mediaDevices.getUserMedia({
@@ -320,19 +281,13 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>) => {
                                 0, 0, TARGET_RESOLUTION, TARGET_RESOLUTION
                             );
 
-                            canvas.toBlob((blob) => {
-                                if (blob) {
-                                    const reader = new FileReader();
-                                    reader.onloadend = () => {
-                                        const base64data = (reader.result as string)?.split(',')[1];
-                                        if (base64data) {
-                                            const imageBlob: Blob = { data: base64data, mimeType: 'image/jpeg' };
-                                            sessionPromiseRef.current?.then(session => session.sendRealtimeInput({ media: imageBlob }));
-                                        }
-                                    };
-                                    reader.readAsDataURL(blob);
-                                }
-                            }, 'image/jpeg', JPEG_QUALITY);
+                            const dataUrl = canvas.toDataURL('image/jpeg', JPEG_QUALITY);
+                            const base64data = dataUrl.split(',')[1];
+
+                            if (base64data) {
+                                const imageBlob: Blob = { data: base64data, mimeType: 'image/jpeg' };
+                                sessionPromiseRef.current?.then(session => session.sendRealtimeInput({ media: imageBlob }));
+                            }
                         }, 1000 / FRAME_RATE);
                     },
                     onmessage: async (message: LiveServerMessage) => {
@@ -378,6 +333,8 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>) => {
                         let msg = errorEvent.message || "Произошла неизвестная ошибка.";
                         if (msg.includes('API key not valid')) {
                             msg = 'Неверный API ключ. Проверьте его в настройках.';
+                        } else if (msg.toLowerCase().includes('network error')) {
+                            msg = 'Ошибка сети. Проверьте подключение к интернету.';
                         }
                         setErrorMessage(msg);
                         setStatus('error');
@@ -402,5 +359,5 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>) => {
         }
     }, [status, stopSession, videoRef]);
 
-    return { status, startSession, stopSession, transcription, errorMessage };
+    return { status, startSession, stopSession, transcription, errorMessage, sessionTime };
 };
