@@ -1,7 +1,8 @@
+
 import React, { useEffect, useRef } from 'react';
 
 interface StatusDisplayProps {
-    status: 'idle' | 'connecting' | 'active' | 'error';
+    status: 'idle' | 'connecting' | 'reconnecting' | 'active' | 'error';
     transcription: string;
     error: string | null;
     apiKeySelected: boolean;
@@ -53,6 +54,8 @@ export const StatusDisplay: React.FC<StatusDisplayProps> = ({ status, transcript
                 return 'Готов к работе. Нажмите СТАРТ.';
             case 'connecting':
                 return 'Подключение...';
+            case 'reconnecting':
+                return 'Восстановление связи...';
             case 'active':
                 return transcription || '...';
             default:

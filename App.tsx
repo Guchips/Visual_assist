@@ -5,6 +5,7 @@ import { ActionButton } from './components/ActionButton';
 import { StatusDisplay } from './components/StatusDisplay';
 import { SettingsScreen } from './components/SettingsScreen';
 import { CameraControls } from './components/CameraControls';
+import { FullscreenButton } from './components/FullscreenButton';
 
 interface GearIconProps {
     showNotification?: boolean;
@@ -29,6 +30,7 @@ const App: React.FC = () => {
     const videoRef = useRef<HTMLVideoElement>(null);
     const [apiKeySelected, setApiKeySelected] = useState(false);
     const [showSettings, setShowSettings] = useState(false);
+    const [isFullscreen, setIsFullscreen] = useState(false);
 
     const checkApiKey = () => {
         const key = localStorage.getItem('gemini-api-key');
@@ -60,6 +62,16 @@ const App: React.FC = () => {
     useEffect(() => {
         checkApiKey();
     }, []);
+
+    useEffect(() => {
+        const handleFullscreenChange = () => {
+            setIsFullscreen(!!document.fullscreenElement);
+        };
+        document.addEventListener('fullscreenchange', handleFullscreenChange);
+        return () => {
+            document.removeEventListener('fullscreenchange', handleFullscreenChange);
+        };
+    }, []);
     
     const handleAction = async () => {
         if (status === 'active') {
@@ -76,6 +88,19 @@ const App: React.FC = () => {
     const handleSaveKey = () => {
         checkApiKey();
     };
+    
+    const toggleFullscreen = () => {
+        if (!document.fullscreenElement) {
+            document.documentElement.requestFullscreen().catch(err => {
+                console.error(`Error attempting to enable full-screen mode: ${err.message} (${err.name})`);
+            });
+        } else {
+            if (document.exitFullscreen) {
+                document.exitFullscreen();
+            }
+        }
+    };
+
 
     const formatTime = (seconds: number) => {
         const h = Math.floor(seconds / 3600).toString().padStart(2, '0');
@@ -96,7 +121,7 @@ const App: React.FC = () => {
 
             {/* Header - Always on top */}
             <header className="w-full text-center py-2 relative flex-shrink-0 flex justify-between items-center px-4">
-                <div className="w-8 h-8"></div> {/* Spacer for centering title */}
+                <FullscreenButton isFullscreen={isFullscreen} onClick={toggleFullscreen} />
                 <h1 className="text-2xl md:text-3xl font-bold text-high-contrast-accent">Ассистент</h1>
                 <button
                     onClick={() => setShowSettings(true)}
@@ -137,7 +162,7 @@ const App: React.FC = () => {
                             status={status}
                             onClick={handleAction}
                         />
-                        {(status === 'active' || status === 'connecting') && (
+                        {(status === 'active' || status === 'connecting' || status === 'reconnecting') && (
                             <div className="mt-2 text-center">
                                 <p className="text-lg text-high-contrast-accent font-mono" aria-live="off">
                                     {formatTime(sessionTime)}

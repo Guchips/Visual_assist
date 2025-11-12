@@ -2,7 +2,7 @@
 import React from 'react';
 
 interface ActionButtonProps {
-    status: 'idle' | 'connecting' | 'active' | 'error';
+    status: 'idle' | 'connecting' | 'reconnecting' | 'active' | 'error';
     onClick: () => void;
 }
 
@@ -12,6 +12,7 @@ export const ActionButton: React.FC<ActionButtonProps> = ({ status, onClick }) =
             case 'active':
                 return 'СТОП';
             case 'connecting':
+            case 'reconnecting':
                 return '...';
             case 'idle':
             case 'error':
@@ -24,7 +25,7 @@ export const ActionButton: React.FC<ActionButtonProps> = ({ status, onClick }) =
         if (status === 'active') {
             return 'animate-pulse-slow';
         }
-        if (status === 'connecting') {
+        if (status === 'connecting' || status === 'reconnecting') {
             return 'animate-spin';
         }
         return '';
@@ -33,7 +34,7 @@ export const ActionButton: React.FC<ActionButtonProps> = ({ status, onClick }) =
     return (
         <button
             onClick={onClick}
-            disabled={status === 'connecting'}
+            disabled={status === 'connecting' || status === 'reconnecting'}
             className={`
                 w-40 h-40 landscape:w-36 landscape:h-36 md:w-48 md:h-48 
                 rounded-full 

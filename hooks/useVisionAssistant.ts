@@ -1,10 +1,9 @@
-
 import { useState, useRef, useCallback, RefObject } from 'react';
 // Fix: Use LiveConnectParameters for ai.live.connect options.
 import { GoogleGenAI, LiveServerMessage, Modality, Blob, LiveConnectParameters } from '@google/genai';
 import { encode, decode, decodeAudioData } from '../services/audioUtils';
 
-type Status = 'idle' | 'connecting' | 'active' | 'error';
+type Status = 'idle' | 'connecting' | 'reconnecting' | 'active' | 'error';
 export interface CameraCapabilities {
     torch: boolean;
     zoom: boolean;
@@ -144,13 +143,10 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>, onApiK
     const cleanupSession = useCallback((isFullStop: boolean) => {
         console.log(`Cleaning up session. Full stop: ${isFullStop}`);
         
+        // Очистка, общая для переподключения и полной остановки
         if (frameIntervalRef.current) {
             clearInterval(frameIntervalRef.current);
             frameIntervalRef.current = null;
-        }
-        if (isFullStop && timerIntervalRef.current) {
-            clearInterval(timerIntervalRef.current);
-            timerIntervalRef.current = null;
         }
         if (sessionRef.current) {
              if (typeof sessionRef.current.close === 'function') {
@@ -162,31 +158,38 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>, onApiK
             scriptProcessorRef.current.disconnect();
             scriptProcessorRef.current = null;
         }
-         if (inputAudioContextRef.current && inputAudioContextRef.current.state !== 'closed') {
-            inputAudioContextRef.current.close();
-            inputAudioContextRef.current = null;
-        }
-        if (outputAudioContextRef.current && outputAudioContextRef.current.state !== 'closed') {
-             audioSourcesRef.current.forEach(source => source.stop());
-             audioSourcesRef.current.clear();
-             outputAudioContextRef.current.close();
-             outputAudioContextRef.current = null;
-        }
-        if (videoTrackRef.current && isFlashlightOn) {
-            // Fix: Cast constraint to any to allow non-standard 'torch' property.
-            videoTrackRef.current.applyConstraints({ advanced: [{ torch: false } as any] });
-        }
-        videoTrackRef.current = null;
-
-        if (mediaStreamRef.current) {
-            mediaStreamRef.current.getTracks().forEach(track => track.stop());
-            mediaStreamRef.current = null;
-        }
-        if (videoRef.current) {
-            videoRef.current.srcObject = null;
-        }
         
+        // Очистка ТОЛЬКО для полной остановки
         if (isFullStop) {
+            if (timerIntervalRef.current) {
+                clearInterval(timerIntervalRef.current);
+                timerIntervalRef.current = null;
+            }
+             if (outputAudioContextRef.current && outputAudioContextRef.current.state !== 'closed') {
+                 audioSourcesRef.current.forEach(source => source.stop());
+                 audioSourcesRef.current.clear();
+                 outputAudioContextRef.current.close();
+                 outputAudioContextRef.current = null;
+            }
+             if (inputAudioContextRef.current && inputAudioContextRef.current.state !== 'closed') {
+                inputAudioContextRef.current.close();
+                inputAudioContextRef.current = null;
+            }
+
+            if (videoTrackRef.current && isFlashlightOn) {
+                // Fix: Cast constraint to any to allow non-standard 'torch' property.
+                videoTrackRef.current.applyConstraints({ advanced: [{ torch: false } as any] });
+            }
+            videoTrackRef.current = null;
+
+            if (mediaStreamRef.current) {
+                mediaStreamRef.current.getTracks().forEach(track => track.stop());
+                mediaStreamRef.current = null;
+            }
+            if (videoRef.current) {
+                videoRef.current.srcObject = null;
+            }
+            
             setStatus('idle');
             setTranscription('');
             setErrorMessage(null);
@@ -194,7 +197,7 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>, onApiK
             setIsFlashlightOn(false);
             setCameraCapabilities(null);
             setCurrentZoom(1);
-            sessionHandleRef.current = null; // Clear handle on full stop
+            sessionHandleRef.current = null; // Очищаем хэндл только при полной остановке
         }
     }, [videoRef, isFlashlightOn]);
     
@@ -204,8 +207,8 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>, onApiK
         cleanupSession(true);
     }, [cleanupSession]);
 
-    const startSession = useCallback(async () => {
-        if (status === 'connecting' || status === 'active') {
+    const startSession = useCallback(async (isReconnectionAttempt = false) => {
+        if (!isReconnectionAttempt && (status === 'connecting' || status === 'active' || status === 'reconnecting')) {
             return;
         }
         isIntentionalStopRef.current = false;
@@ -217,73 +220,86 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>, onApiK
             return;
         }
 
-        setStatus('connecting');
+        const isReconnecting = isReconnectionAttempt || !!mediaStreamRef.current;
+        setStatus(isReconnecting ? 'reconnecting' : 'connecting');
         setErrorMessage(null);
-        setTranscription('Запрос разрешений...');
+        if (!isReconnecting) {
+             setTranscription('Запрос разрешений...');
+        } else {
+             setTranscription('Восстановление связи...');
+        }
 
         try {
-            const stream = await navigator.mediaDevices.getUserMedia({
-                audio: { sampleRate: 16000, channelCount: 1 },
-                video: { 
-                    facingMode: 'environment',
-                    width: { ideal: TARGET_RESOLUTION },
-                    height: { ideal: TARGET_RESOLUTION },
-                    frameRate: { ideal: FRAME_RATE, max: FRAME_RATE }
-                }
-            });
-            mediaStreamRef.current = stream;
-            
-            const videoTrack = stream.getVideoTracks()[0];
-            videoTrackRef.current = videoTrack;
-
-            if (typeof videoTrack.getCapabilities === 'function') {
-                const capabilities = videoTrack.getCapabilities();
-                const newCapabilities: CameraCapabilities = {
-                    // Fix: Cast capabilities to any to access non-standard 'torch' and 'zoom' properties.
-                    torch: 'torch' in capabilities && !!(capabilities as any).torch,
-                    zoom: 'zoom' in capabilities && !!(capabilities as any).zoom,
-                    minZoom: (capabilities as any).zoom?.min ?? 1,
-                    maxZoom: (capabilities as any).zoom?.max ?? 1,
-                    stepZoom: (capabilities as any).zoom?.step ?? 0.1,
-                };
-                setCameraCapabilities(newCapabilities);
-
-                const settings = videoTrack.getSettings();
-                // Fix: Cast settings to any to access non-standard 'torch' and 'zoom' properties.
-                setIsFlashlightOn(!!(settings as any).torch);
-                setCurrentZoom((settings as any).zoom ?? 1);
-            } else {
-                setCameraCapabilities({ torch: false, zoom: false, minZoom: 1, maxZoom: 1, stepZoom: 0.1 });
-            }
-
-            if (typeof videoTrack.applyConstraints === 'function') {
-                try {
-                    const supportedConstraints = navigator.mediaDevices.getSupportedConstraints();
-                    const constraintsToApply: any = {};
-
-                    if ((supportedConstraints as any).focusMode) constraintsToApply.focusMode = 'continuous';
-                    if ((supportedConstraints as any).exposureMode) constraintsToApply.exposureMode = 'continuous';
-                    if ((supportedConstraints as any).whiteBalanceMode) constraintsToApply.whiteBalanceMode = 'continuous';
-                    
-                    if (Object.keys(constraintsToApply).length > 0) {
-                        console.log('Применение продвинутых настроек видео:', constraintsToApply);
-                        await videoTrack.applyConstraints(constraintsToApply);
+            if (!mediaStreamRef.current) {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    audio: { sampleRate: 16000, channelCount: 1 },
+                    video: { 
+                        facingMode: 'environment',
+                        width: { ideal: TARGET_RESOLUTION },
+                        height: { ideal: TARGET_RESOLUTION },
+                        frameRate: { ideal: FRAME_RATE, max: FRAME_RATE }
                     }
-                } catch (e) {
-                    console.warn('Не удалось применить продвинутые настройки видео:', e);
-                }
-            }
+                });
+                mediaStreamRef.current = stream;
+                
+                const videoTrack = stream.getVideoTracks()[0];
+                videoTrackRef.current = videoTrack;
 
-            if (videoRef.current) {
-                videoRef.current.srcObject = stream;
+                if (typeof videoTrack.getCapabilities === 'function') {
+                    const capabilities = videoTrack.getCapabilities();
+                    const newCapabilities: CameraCapabilities = {
+                        // Fix: Cast capabilities to any to access non-standard 'torch' and 'zoom' properties.
+                        torch: 'torch' in capabilities && !!(capabilities as any).torch,
+                        zoom: 'zoom' in capabilities && !!(capabilities as any).zoom,
+                        minZoom: (capabilities as any).zoom?.min ?? 1,
+                        maxZoom: (capabilities as any).zoom?.max ?? 1,
+                        stepZoom: (capabilities as any).zoom?.step ?? 0.1,
+                    };
+                    setCameraCapabilities(newCapabilities);
+
+                    const settings = videoTrack.getSettings();
+                    // Fix: Cast settings to any to access non-standard 'torch' and 'zoom' properties.
+                    setIsFlashlightOn(!!(settings as any).torch);
+                    setCurrentZoom((settings as any).zoom ?? 1);
+                } else {
+                    setCameraCapabilities({ torch: false, zoom: false, minZoom: 1, maxZoom: 1, stepZoom: 0.1 });
+                }
+
+                if (typeof videoTrack.applyConstraints === 'function') {
+                    try {
+                        const supportedConstraints = navigator.mediaDevices.getSupportedConstraints();
+                        const constraintsToApply: any = {};
+
+                        if ((supportedConstraints as any).focusMode) constraintsToApply.focusMode = 'continuous';
+                        if ((supportedConstraints as any).exposureMode) constraintsToApply.exposureMode = 'continuous';
+                        if ((supportedConstraints as any).whiteBalanceMode) constraintsToApply.whiteBalanceMode = 'continuous';
+                        
+                        if (Object.keys(constraintsToApply).length > 0) {
+                            console.log('Применение продвинутых настроек видео:', constraintsToApply);
+                            await videoTrack.applyConstraints(constraintsToApply);
+                        }
+                    } catch (e) {
+                        console.warn('Не удалось применить продвинутые настройки видео:', e);
+                    }
+                }
+
+                if (videoRef.current) {
+                    videoRef.current.srcObject = stream;
+                }
             }
             
             const ai = new GoogleGenAI({ apiKey });
 
-            inputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
-            outputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
-            
-            setTranscription('Подключение к Gemini...');
+            if (!inputAudioContextRef.current) {
+                 inputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
+            }
+            if (!outputAudioContextRef.current) {
+                outputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+            }
+
+            if (!isReconnecting) {
+                setTranscription('Подключение к Gemini...');
+            }
             
             const connectOptions: LiveConnectParameters = {
                 model: 'gemini-2.5-flash-native-audio-preview-09-2025',
@@ -301,14 +317,15 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>, onApiK
                         setTranscription('Сессия активна. Описываю окружение...');
                         if ('vibrate' in navigator) navigator.vibrate(100);
 
-                        // Start session timer
-                        setSessionTime(0);
-                        if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
-                        timerIntervalRef.current = window.setInterval(() => {
-                            setSessionTime(prevTime => prevTime + 1);
-                        }, 1000);
+                        // Запускаем таймер, только если он еще не запущен
+                        if (!timerIntervalRef.current) {
+                            setSessionTime(0);
+                            timerIntervalRef.current = window.setInterval(() => {
+                                setSessionTime(prevTime => prevTime + 1);
+                            }, 1000);
+                        }
 
-                        const source = inputAudioContextRef.current!.createMediaStreamSource(stream);
+                        const source = inputAudioContextRef.current!.createMediaStreamSource(mediaStreamRef.current!);
                         const processor = inputAudioContextRef.current!.createScriptProcessor(4096, 1, 1);
                         scriptProcessorRef.current = processor;
 
@@ -407,20 +424,9 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>, onApiK
                             setErrorMessage(msg);
                             setStatus('error');
                             cleanupSession(true);
-                            return;
                         }
-
-                        if (msg.toLowerCase().includes('network error')) {
-                            msg = 'Сетевая ошибка. Проверьте интернет и отключите блокировщики рекламы.';
-                        }
-
-                        if (sessionHandleRef.current) {
-                            console.warn("Error with session handle, clearing it for reconnection attempt.");
-                            sessionHandleRef.current = null;
-                        }
-                        
-                        setErrorMessage(msg);
-                        setStatus('error');
+                        // Для всех остальных ошибок мы просто логируем их.
+                        // Логика onclose возьмет на себя попытку переподключения.
                     },
                     onclose: () => {
                         console.log('Session closed.');
@@ -431,7 +437,7 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>, onApiK
                         
                         console.log('Unexpected closure. Attempting to reconnect...');
                         cleanupSession(false);
-                        setTimeout(() => startSession(), 1000);
+                        setTimeout(() => startSession(true), 1000); // Передаем флаг переподключения
                     },
                 }
             };
