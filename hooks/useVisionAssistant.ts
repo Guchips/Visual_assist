@@ -1,4 +1,5 @@
-import { useState, useRef, useCallback, RefObject } from 'react';
+
+import { useState, useRef, useCallback, RefObject, useEffect } from 'react';
 // Fix: Use LiveConnectParameters for ai.live.connect options.
 import { GoogleGenAI, LiveServerMessage, Modality, Blob, LiveConnectParameters } from '@google/genai';
 import { encode, decode, decodeAudioData } from '../services/audioUtils';
@@ -15,6 +16,7 @@ export interface CameraCapabilities {
 const FRAME_RATE = 1; // кадров в секунду
 const TARGET_RESOLUTION = 768; // Уменьшено разрешение для стабильности
 const JPEG_QUALITY = 0.8; // Уменьшено качество для уменьшения размера файла
+const MAX_RETRIES = 5; // Максимальное количество попыток переподключения
 
 const SYSTEM_PROMPT = `Ты — персональный видео-ассистент для слабовидящих людей с 30-летним опытом помощи. Тебя зовут Аня, твой создатель Кирилл. Ты очень веселая,остоумная и любишь шутить с собеседниками. 
 ВСЕГДА отвечай на русском языке.
@@ -132,6 +134,7 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>, onApiK
     const inputAudioContextRef = useRef<AudioContext | null>(null);
     const outputAudioContextRef = useRef<AudioContext | null>(null);
     const scriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
+    const mediaStreamSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
     const frameIntervalRef = useRef<number | null>(null);
     const timerIntervalRef = useRef<number | null>(null);
     const audioSourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
@@ -139,45 +142,67 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>, onApiK
     const sessionPromiseRef = useRef<Promise<any> | null>(null);
     const sessionHandleRef = useRef<string | null>(null);
     const isIntentionalStopRef = useRef(false);
+    const retryAttemptsRef = useRef(0);
 
     const cleanupSession = useCallback((isFullStop: boolean) => {
-        console.log(`Cleaning up session. Full stop: ${isFullStop}`);
-        
-        // Очистка, общая для переподключения и полной остановки
+        console.log(`РИТУАЛ ОЧИСТКИ. Полная остановка: ${isFullStop}`);
+
+        // 1. Останавливаем генерацию новых данных
         if (frameIntervalRef.current) {
             clearInterval(frameIntervalRef.current);
             frameIntervalRef.current = null;
         }
+
+        // 2. Завершаем сетевую сессию
         if (sessionRef.current) {
              if (typeof sessionRef.current.close === 'function') {
-                sessionRef.current.close();
-            }
+                 sessionRef.current.close();
+             }
             sessionRef.current = null;
         }
+
+        // 3. Очищаем аудио-выход (Output)
+        if (outputAudioContextRef.current) {
+            audioSourcesRef.current.forEach(source => {
+                source.stop();
+                source.disconnect();
+            });
+            audioSourcesRef.current.clear();
+            nextAudioStartTimeRef.current = 0;
+        }
+
+        // 4. Очищаем аудио-вход (Input)
         if (scriptProcessorRef.current) {
             scriptProcessorRef.current.disconnect();
             scriptProcessorRef.current = null;
         }
+        if (mediaStreamSourceRef.current) {
+            mediaStreamSourceRef.current.disconnect();
+            mediaStreamSourceRef.current = null;
+        }
         
-        // Очистка ТОЛЬКО для полной остановки
+        // Этот блок выполняется ТОЛЬКО при полной остановке
         if (isFullStop) {
+            // Дополнительно останавливаем таймер сессии
             if (timerIntervalRef.current) {
                 clearInterval(timerIntervalRef.current);
                 timerIntervalRef.current = null;
             }
-             if (outputAudioContextRef.current && outputAudioContextRef.current.state !== 'closed') {
-                 audioSourcesRef.current.forEach(source => source.stop());
-                 audioSourcesRef.current.clear();
-                 outputAudioContextRef.current.close();
-                 outputAudioContextRef.current = null;
-            }
-             if (inputAudioContextRef.current && inputAudioContextRef.current.state !== 'closed') {
-                inputAudioContextRef.current.close();
-                inputAudioContextRef.current = null;
-            }
 
+            // 5. Закрываем аудио-контексты (ПОСЛЕ disconnect всех узлов)
+            if (outputAudioContextRef.current && outputAudioContextRef.current.state !== 'closed') {
+                outputAudioContextRef.current.close();
+            }
+            if (inputAudioContextRef.current && inputAudioContextRef.current.state !== 'closed') {
+                inputAudioContextRef.current.close();
+            }
+            // Null refs after closing to prevent reuse
+            outputAudioContextRef.current = null;
+            inputAudioContextRef.current = null;
+
+
+            // 6. Освобождаем оборудование
             if (videoTrackRef.current && isFlashlightOn) {
-                // Fix: Cast constraint to any to allow non-standard 'torch' property.
                 videoTrackRef.current.applyConstraints({ advanced: [{ torch: false } as any] });
             }
             videoTrackRef.current = null;
@@ -190,6 +215,7 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>, onApiK
                 videoRef.current.srcObject = null;
             }
             
+            // 7. Сбрасываем состояние UI
             setStatus('idle');
             setTranscription('');
             setErrorMessage(null);
@@ -197,7 +223,7 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>, onApiK
             setIsFlashlightOn(false);
             setCameraCapabilities(null);
             setCurrentZoom(1);
-            sessionHandleRef.current = null; // Очищаем хэндл только при полной остановке
+            sessionHandleRef.current = null;
         }
     }, [videoRef, isFlashlightOn]);
     
@@ -205,6 +231,14 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>, onApiK
         console.log('Stopping session intentionally...');
         isIntentionalStopRef.current = true;
         cleanupSession(true);
+    }, [cleanupSession]);
+
+    // This effect handles the component unmount scenario (e.g., closing the tab)
+    useEffect(() => {
+        return () => {
+            // isIntentionalStopRef is not needed here as we know it's a full stop
+            cleanupSession(true);
+        };
     }, [cleanupSession]);
 
     const startSession = useCallback(async (isReconnectionAttempt = false) => {
@@ -297,6 +331,43 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>, onApiK
                 outputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
             }
 
+             // --- START: Proactive Greeting Logic ---
+            if (!isReconnecting) {
+                setTranscription('Генерация приветствия...');
+                console.log('Initiating greeting audio generation...');
+                
+                ai.models.generateContent({
+                    model: "gemini-2.5-flash-preview-tts",
+                    contents: [{ parts: [{ text: 'Привет, Жека. Как ты сегодня? Чем тебе помочь?' }] }],
+                    config: {
+                        responseModalities: [Modality.AUDIO],
+                        speechConfig: {
+                            voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Zephyr' } },
+                        },
+                    },
+                }).then(async (greetingResponse) => {
+                    const audioData = greetingResponse.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+                    if (audioData && outputAudioContextRef.current && outputAudioContextRef.current.state === 'running') {
+                        console.log("Greeting audio received, playing now.");
+                        const outputCtx = outputAudioContextRef.current;
+                        const startTime = outputCtx.currentTime;
+                        const audioBuffer = await decodeAudioData(decode(audioData), outputCtx, 24000, 1);
+                        const source = outputCtx.createBufferSource();
+                        source.buffer = audioBuffer;
+                        source.connect(outputCtx.destination);
+                        source.start(startTime);
+                        
+                        audioSourcesRef.current.add(source);
+                        source.addEventListener('ended', () => {
+                            audioSourcesRef.current.delete(source);
+                        });
+                    }
+                }).catch(e => {
+                    console.error("Failed to generate greeting audio in background:", e);
+                });
+            }
+            // --- END: Proactive Greeting Logic ---
+
             if (!isReconnecting) {
                 setTranscription('Подключение к Gemini...');
             }
@@ -313,8 +384,9 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>, onApiK
                 callbacks: {
                     onopen: () => {
                         console.log('Session opened.');
+                        retryAttemptsRef.current = 0; // ✅ Сброс при успешном подключении
                         setStatus('active');
-                        setTranscription('Сессия активна. Описываю окружение...');
+                        setTranscription('Сессия активна. Ожидаю вашего голоса...');
                         if ('vibrate' in navigator) navigator.vibrate(100);
 
                         // Запускаем таймер, только если он еще не запущен
@@ -326,6 +398,7 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>, onApiK
                         }
 
                         const source = inputAudioContextRef.current!.createMediaStreamSource(mediaStreamRef.current!);
+                        mediaStreamSourceRef.current = source;
                         const processor = inputAudioContextRef.current!.createScriptProcessor(4096, 1, 1);
                         scriptProcessorRef.current = processor;
 
@@ -397,10 +470,6 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>, onApiK
                             source.buffer = audioBuffer;
                             source.connect(outputCtx.destination);
                             
-                            source.addEventListener('ended', () => {
-                                audioSourcesRef.current.delete(source);
-                            });
-
                             source.start(nextAudioStartTimeRef.current);
                             nextAudioStartTimeRef.current += audioBuffer.duration;
                             audioSourcesRef.current.add(source);
@@ -413,20 +482,26 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>, onApiK
                         }
                     },
                     onerror: (e) => {
-                        console.error('Session error:', e);
                         const errorEvent = e as ErrorEvent;
-                        let msg = errorEvent.message || "Произошла неизвестная ошибка.";
+                        console.error('🔴 ОШИБКА СЕССИИ:', {
+                            message: errorEvent.message,
+                            error: errorEvent.error,
+                            timestamp: new Date().toISOString(),
+                            navigatorOnline: navigator.onLine,
+                            sessionExists: !!sessionRef.current,
+                            mediaStreamActive: mediaStreamRef.current?.active,
+                            retryAttempt: retryAttemptsRef.current
+                        });
                         
-                        if (msg.includes('API key not valid') || msg.includes('API_KEY_INVALID') || msg.includes('API key is invalid')) {
-                            msg = 'Ваш API-ключ недействителен. Пожалуйста, введите новый ключ в настройках (значок ⚙️).';
+                        // Для API key errors
+                        if (errorEvent.message?.includes('API key')) {
+                            const msg = 'Ваш API-ключ недействителен. Пожалуйста, введите новый ключ в настройках (значок ⚙️).';
                             onApiKeyError();
                             isIntentionalStopRef.current = true;
                             setErrorMessage(msg);
                             setStatus('error');
                             cleanupSession(true);
                         }
-                        // Для всех остальных ошибок мы просто логируем их.
-                        // Логика onclose возьмет на себя попытку переподключения.
                     },
                     onclose: () => {
                         console.log('Session closed.');
@@ -435,9 +510,23 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>, onApiK
                             return;
                         }
                         
-                        console.log('Unexpected closure. Attempting to reconnect...');
                         cleanupSession(false);
-                        setTimeout(() => startSession(true), 1000); // Передаем флаг переподключения
+
+                        if (retryAttemptsRef.current < MAX_RETRIES) {
+                            // Exponential: 1s → 2s → 4s → 8s → 16s
+                            const baseDelay = Math.min(1000 * Math.pow(2, retryAttemptsRef.current), 30000);
+                            // Jitter: +0-3000ms (предотвращает "thundering herd")
+                            const delay = baseDelay + Math.floor(Math.random() * 3000);
+                            
+                            console.log(`Unexpected closure. Attempting to reconnect in ${delay}ms... (Attempt ${retryAttemptsRef.current + 1})`);
+                            
+                            retryAttemptsRef.current++;
+                            setTimeout(() => startSession(true), delay);
+                        } else {
+                            console.error(`Max retries (${MAX_RETRIES}) reached. Stopping reconnection attempts.`);
+                            setStatus('error');
+                            setErrorMessage('Не удалось восстановить связь. Проверьте подключение к интернету.');
+                        }
                     },
                 }
             };
@@ -468,6 +557,34 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>, onApiK
             cleanupSession(true);
         }
     }, [status, cleanupSession, videoRef, onApiKeyError]);
+    
+    // This effect handles network online/offline state changes
+    useEffect(() => {
+        const handleOnline = () => {
+            console.log('✅ Сеть восстановлена');
+            if (status === 'error' || status === 'idle') {
+                console.log('Attempting to reconnect after network came back online...');
+                retryAttemptsRef.current = 0; // Сбросить попытки
+                startSession(true);
+            }
+        };
+        
+        const handleOffline = () => {
+            console.log('❌ Сеть пропала');
+            setErrorMessage('Потеряно соединение с интернетом');
+            setStatus('error');
+            isIntentionalStopRef.current = true; // Предотвратить бесполезные retry
+            cleanupSession(false);
+        };
+        
+        window.addEventListener('online', handleOnline);
+        window.addEventListener('offline', handleOffline);
+        
+        return () => {
+            window.removeEventListener('online', handleOnline);
+            window.removeEventListener('offline', handleOffline);
+        };
+    }, [status, startSession, cleanupSession]);
 
     const toggleFlashlight = useCallback(async () => {
         if (videoTrackRef.current && cameraCapabilities?.torch) {

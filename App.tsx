@@ -72,6 +72,13 @@ const App: React.FC = () => {
             document.removeEventListener('fullscreenchange', handleFullscreenChange);
         };
     }, []);
+
+    // Гарантированная очистка ресурсов при размонтировании компонента (закрытие вкладки)
+    useEffect(() => {
+        return () => {
+            stopSession();
+        };
+    }, [stopSession]);
     
     const handleAction = async () => {
         if (status === 'active') {
