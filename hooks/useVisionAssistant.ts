@@ -13,7 +13,7 @@ type Status = 'idle' | 'connecting' | 'active' | 'error';
 const FRAME_RATE = 1; // кадров в секунду
 const TARGET_RESOLUTION = 768; // Уменьшено разрешение для стабильности
 const JPEG_QUALITY = 0.9; // Уменьшено качество для уменьшения размера файла
-const PROXY_URL = "wss://ws.kazbon.kz"; //"wss://ws.kazbon.kz"; https://gemini-proxy.kirill-gbi.workers.dev
+const PROXY_URL = "https://ws.kazbon.kz"; //"wss://ws.kazbon.kz"; https://gemini-proxy.kirill-gbi.workers.dev
 
 const SYSTEM_PROMPT = `Ты — персональный видео-ассистент для слабовидящих людей с 30-летним опытом помощи. Тебя зовут Аня, твой создатель Кирилл. Ты очень веселая и любишь шутить с собеседниками. 
 ВСЕГДА отвечай на русском языке.
