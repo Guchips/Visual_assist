@@ -1,27 +1,24 @@
-
-import { useState, useRef, useCallback, RefObject, useEffect } from 'react';
-// Fix: Use LiveConnectParameters for ai.live.connect options.
-import { GoogleGenAI, LiveServerMessage, Modality, Blob, LiveConnectParameters } from '@google/genai';
+import { useState, useRef, useCallback, RefObject } from 'react';
+import { GoogleGenAI, LiveServerMessage, Modality, Blob, LiveConnectConfig } from '@google/genai';
 import { encode, decode, decodeAudioData } from '../services/audioUtils';
 
-type Status = 'idle' | 'connecting' | 'reconnecting' | 'active' | 'error';
 export interface CameraCapabilities {
-    torch: boolean;
     zoom: boolean;
     minZoom: number;
     maxZoom: number;
-    stepZoom: number;
+    torch: boolean;
 }
 
+type Status = 'idle' | 'connecting' | 'active' | 'error';
 const FRAME_RATE = 1; // кадров в секунду
 const TARGET_RESOLUTION = 768; // Уменьшено разрешение для стабильности
-const JPEG_QUALITY = 0.8; // Уменьшено качество для уменьшения размера файла 
-const MAX_RETRIES = 5; // Максимальное количество попыток переподключения
+const JPEG_QUALITY = 0.8; // Уменьшено качество для уменьшения размера файла
+const PROXY_URL = "wss://ws.kazbon.kz"; //"wss://ws.kazbon.kz"; https://gemini-proxy.kirill-gbi.workers.dev
 
-const SYSTEM_PROMPT = `Ты — персональный видео-ассистент для слабовидящих людей с 30-летним опытом помощи. Тебя зовут Аня, твой создатель Кирилл. Ты очень веселая,остоумная и любишь шутить с собеседниками. 
+const SYSTEM_PROMPT = `Ты — персональный видео-ассистент для слабовидящих людей с 30-летним опытом помощи. Тебя зовут Аня, твой создатель Кирилл. Ты очень веселая и любишь шутить с собеседниками. 
 ВСЕГДА отвечай на русском языке.
 
-Твоя задача — в приятельском, понятном и спокойном тоне давать точное, полезное и безопасное описание того, что видно через камеру пользователя. Иногда остоумно комментируй то, что видишь, но без оскорблений (Например, если увидел на столе много предметов, то можно сказать "ооо, кажется тут давно не прибирались!"). Пользователя зовут "Жека". В начале каждой сессии обязательно: коротко поздоровайся по имени, спроси как дела и чем сегодня помочь ему. Обращайся к нему по имени 1 раз в 7 предложений. Пример: "Привет, Жека. Как ты сегодня? Чем тебе помочь?"
+Твоя задача — в дружеском, понятном и спокойном тоне давать точное, полезное и безопасное описание того, что видно через камеру пользователя. Периодически шути. Пользователя зовут "Жека". В начале каждой сессии обязательно: коротко поздоровайся по имени, спроси как дела и чем сегодня помочь ему. Обращайся к нему по имени 1 раз в 7 предложений. Пример: "Привет, Жека. Как ты сегодня? Чем тебе помочь?"
 
 **ПРАВИЛА ПОВЕДЕНИЯ И ФОРМАТ ОТВЕТА:**
 
@@ -36,7 +33,7 @@ const SYSTEM_PROMPT = `Ты — персональный видео-ассист
 
 **2. Язык и стиль:**
 
-- Приятельский, спокойный, ясный. Короткие предложения. Периодически обращайся к Жеке по имени. Периодически шути, когда ничего не происходит. Смейся вместе с пользователем, иногда предлагай рассказать шутку.
+- Дружелюбный, спокойный, ясный. Короткие предложения. Периодически обращайся к Жеке по имени.
     
 - Никакой технической терминологии без объяснения. Если используешь термин — поясняй.
     
@@ -119,22 +116,17 @@ const SYSTEM_PROMPT = `Ты — персональный видео-ассист
 **Следуй этим правилам постоянно. Если появится конфликт между правилами, приоритет у пунктов в том порядке, в котором они перечислены (безопасность всегда первична).**`;
 
 
-export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>, onApiKeyError: () => void) => {
+export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>) => {
     const [status, setStatus] = useState<Status>('idle');
     const [transcription, setTranscription] = useState('');
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
     const [sessionTime, setSessionTime] = useState(0);
-    const [isFlashlightOn, setIsFlashlightOn] = useState(false);
-    const [cameraCapabilities, setCameraCapabilities] = useState<CameraCapabilities | null>(null);
-    const [currentZoom, setCurrentZoom] = useState(1);
 
     const sessionRef = useRef<any | null>(null);
     const mediaStreamRef = useRef<MediaStream | null>(null);
-    const videoTrackRef = useRef<MediaStreamTrack | null>(null);
     const inputAudioContextRef = useRef<AudioContext | null>(null);
     const outputAudioContextRef = useRef<AudioContext | null>(null);
     const scriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
-    const mediaStreamSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
     const frameIntervalRef = useRef<number | null>(null);
     const timerIntervalRef = useRef<number | null>(null);
     const audioSourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
@@ -142,90 +134,54 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>, onApiK
     const sessionPromiseRef = useRef<Promise<any> | null>(null);
     const sessionHandleRef = useRef<string | null>(null);
     const isIntentionalStopRef = useRef(false);
-    const retryAttemptsRef = useRef(0);
 
     const cleanupSession = useCallback((isFullStop: boolean) => {
-        console.log(`РИТУАЛ ОЧИСТКИ. Полная остановка: ${isFullStop}`);
-
-        // 1. Останавливаем генерацию новых данных
+        console.log(`Cleaning up session. Full stop: ${isFullStop}`);
+        
         if (frameIntervalRef.current) {
             clearInterval(frameIntervalRef.current);
             frameIntervalRef.current = null;
         }
-
-        // 2. Завершаем сетевую сессию
+        if (isFullStop && timerIntervalRef.current) {
+            clearInterval(timerIntervalRef.current);
+            timerIntervalRef.current = null;
+        }
         if (sessionRef.current) {
              if (typeof sessionRef.current.close === 'function') {
-                 sessionRef.current.close();
-             }
+                sessionRef.current.close();
+            }
             sessionRef.current = null;
         }
-
-        // 3. Очищаем аудио-выход (Output)
-        if (outputAudioContextRef.current) {
-            audioSourcesRef.current.forEach(source => {
-                source.stop();
-                source.disconnect();
-            });
-            audioSourcesRef.current.clear();
-            nextAudioStartTimeRef.current = 0;
-        }
-
-        // 4. Очищаем аудио-вход (Input)
         if (scriptProcessorRef.current) {
             scriptProcessorRef.current.disconnect();
             scriptProcessorRef.current = null;
         }
-        if (mediaStreamSourceRef.current) {
-            mediaStreamSourceRef.current.disconnect();
-            mediaStreamSourceRef.current = null;
+         if (inputAudioContextRef.current && inputAudioContextRef.current.state !== 'closed') {
+            inputAudioContextRef.current.close();
+            inputAudioContextRef.current = null;
+        }
+        if (outputAudioContextRef.current && outputAudioContextRef.current.state !== 'closed') {
+             audioSourcesRef.current.forEach(source => source.stop());
+             audioSourcesRef.current.clear();
+             outputAudioContextRef.current.close();
+             outputAudioContextRef.current = null;
+        }
+        if (mediaStreamRef.current) {
+            mediaStreamRef.current.getTracks().forEach(track => track.stop());
+            mediaStreamRef.current = null;
+        }
+        if (videoRef.current) {
+            videoRef.current.srcObject = null;
         }
         
-        // Этот блок выполняется ТОЛЬКО при полной остановке
         if (isFullStop) {
-            // Дополнительно останавливаем таймер сессии
-            if (timerIntervalRef.current) {
-                clearInterval(timerIntervalRef.current);
-                timerIntervalRef.current = null;
-            }
-
-            // 5. Закрываем аудио-контексты (ПОСЛЕ disconnect всех узлов)
-            if (outputAudioContextRef.current && outputAudioContextRef.current.state !== 'closed') {
-                outputAudioContextRef.current.close();
-            }
-            if (inputAudioContextRef.current && inputAudioContextRef.current.state !== 'closed') {
-                inputAudioContextRef.current.close();
-            }
-            // Null refs after closing to prevent reuse
-            outputAudioContextRef.current = null;
-            inputAudioContextRef.current = null;
-
-
-            // 6. Освобождаем оборудование
-            if (videoTrackRef.current && isFlashlightOn) {
-                videoTrackRef.current.applyConstraints({ advanced: [{ torch: false } as any] });
-            }
-            videoTrackRef.current = null;
-
-            if (mediaStreamRef.current) {
-                mediaStreamRef.current.getTracks().forEach(track => track.stop());
-                mediaStreamRef.current = null;
-            }
-            if (videoRef.current) {
-                videoRef.current.srcObject = null;
-            }
-            
-            // 7. Сбрасываем состояние UI
             setStatus('idle');
             setTranscription('');
             setErrorMessage(null);
             setSessionTime(0);
-            setIsFlashlightOn(false);
-            setCameraCapabilities(null);
-            setCurrentZoom(1);
-            sessionHandleRef.current = null;
+            sessionHandleRef.current = null; // Clear handle on full stop
         }
-    }, [videoRef, isFlashlightOn]);
+    }, [videoRef]);
     
     const stopSession = useCallback(() => {
         console.log('Stopping session intentionally...');
@@ -233,172 +189,114 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>, onApiK
         cleanupSession(true);
     }, [cleanupSession]);
 
-    // This effect handles the component unmount scenario (e.g., closing the tab)
-    useEffect(() => {
-        return () => {
-            // isIntentionalStopRef is not needed here as we know it's a full stop
-            cleanupSession(true);
-        };
-    }, [cleanupSession]);
-
-    const startSession = useCallback(async (isReconnectionAttempt = false) => {
-        if (!isReconnectionAttempt && (status === 'connecting' || status === 'active' || status === 'reconnecting')) {
+    const startSession = useCallback(async () => {
+        // Prevent starting a new session if one is already connecting or active
+        if (status === 'connecting' || status === 'active') {
             return;
         }
         isIntentionalStopRef.current = false;
 
-        const apiKey = localStorage.getItem('gemini-api-key');
+/*        const apiKey = localStorage.getItem('gemini-api-key');
         if (!apiKey) {
-            setErrorMessage('API-ключ не предоставлен. Пожалуйста, введите его в настройках (значок ⚙️).');
+            setErrorMessage('API ключ не найден. Пожалуйста, укажите его в настройках (значок ⚙️).');
             setStatus('error');
             return;
         }
-
-        const isReconnecting = isReconnectionAttempt || !!mediaStreamRef.current;
-        setStatus(isReconnecting ? 'reconnecting' : 'connecting');
+*/
+        setStatus('connecting');
         setErrorMessage(null);
-        if (!isReconnecting) {
-             setTranscription('Запрос разрешений...');
-        } else {
-             setTranscription('Восстановление связи...');
+        setTranscription('Запрос разрешений...');
+
+        if (status === 'idle') { // Only reset timer on a fresh start
+            setSessionTime(0);
+            if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
+            timerIntervalRef.current = window.setInterval(() => {
+                setSessionTime(prevTime => prevTime + 1);
+            }, 1000);
         }
 
         try {
-            if (!mediaStreamRef.current) {
-                const stream = await navigator.mediaDevices.getUserMedia({
-                    audio: { sampleRate: 16000, channelCount: 1 },
-                    video: { 
-                        facingMode: 'environment',
-                        width: { ideal: TARGET_RESOLUTION },
-                        height: { ideal: TARGET_RESOLUTION },
-                        frameRate: { ideal: FRAME_RATE, max: FRAME_RATE }
+            const stream = await navigator.mediaDevices.getUserMedia({
+                audio: { sampleRate: 16000, channelCount: 1 },
+                video: { 
+                    facingMode: 'environment',
+                    width: { ideal: TARGET_RESOLUTION },
+                    height: { ideal: TARGET_RESOLUTION },
+                    frameRate: { ideal: FRAME_RATE, max: FRAME_RATE }
+                }
+            });
+            mediaStreamRef.current = stream;
+            
+            const videoTrack = stream.getVideoTracks()[0];
+            if (videoTrack && typeof videoTrack.applyConstraints === 'function') {
+                try {
+                    const supportedConstraints = navigator.mediaDevices.getSupportedConstraints();
+                    const constraintsToApply: any = {};
+
+                    if ((supportedConstraints as any).focusMode) constraintsToApply.focusMode = 'continuous';
+                    if ((supportedConstraints as any).exposureMode) constraintsToApply.exposureMode = 'continuous';
+                    if ((supportedConstraints as any).whiteBalanceMode) constraintsToApply.whiteBalanceMode = 'continuous';
+                    
+                    if (Object.keys(constraintsToApply).length > 0) {
+                        console.log('Применение продвинутых настроек видео:', constraintsToApply);
+                        await videoTrack.applyConstraints(constraintsToApply);
                     }
-                });
-                mediaStreamRef.current = stream;
-                
-                const videoTrack = stream.getVideoTracks()[0];
-                videoTrackRef.current = videoTrack;
-
-                if (typeof videoTrack.getCapabilities === 'function') {
-                    const capabilities = videoTrack.getCapabilities();
-                    const newCapabilities: CameraCapabilities = {
-                        // Fix: Cast capabilities to any to access non-standard 'torch' and 'zoom' properties.
-                        torch: 'torch' in capabilities && !!(capabilities as any).torch,
-                        zoom: 'zoom' in capabilities && !!(capabilities as any).zoom,
-                        minZoom: (capabilities as any).zoom?.min ?? 1,
-                        maxZoom: (capabilities as any).zoom?.max ?? 1,
-                        stepZoom: (capabilities as any).zoom?.step ?? 0.1,
-                    };
-                    setCameraCapabilities(newCapabilities);
-
-                    const settings = videoTrack.getSettings();
-                    // Fix: Cast settings to any to access non-standard 'torch' and 'zoom' properties.
-                    setIsFlashlightOn(!!(settings as any).torch);
-                    setCurrentZoom((settings as any).zoom ?? 1);
-                } else {
-                    setCameraCapabilities({ torch: false, zoom: false, minZoom: 1, maxZoom: 1, stepZoom: 0.1 });
+                } catch (e) {
+                    console.warn('Не удалось применить продвинутые настройки видео:', e);
                 }
+            }
 
-                if (typeof videoTrack.applyConstraints === 'function') {
-                    try {
-                        const supportedConstraints = navigator.mediaDevices.getSupportedConstraints();
-                        const constraintsToApply: any = {};
+            if (videoRef.current) {
+                videoRef.current.srcObject = stream;
+            }
 
-                        if ((supportedConstraints as any).focusMode) constraintsToApply.focusMode = 'continuous';
-                        if ((supportedConstraints as any).exposureMode) constraintsToApply.exposureMode = 'continuous';
-                        if ((supportedConstraints as any).whiteBalanceMode) constraintsToApply.whiteBalanceMode = 'continuous';
-                        
-                        if (Object.keys(constraintsToApply).length > 0) {
-                            console.log('Применение продвинутых настроек видео:', constraintsToApply);
-                            await videoTrack.applyConstraints(constraintsToApply);
-                        }
-                    } catch (e) {
-                        console.warn('Не удалось применить продвинутые настройки видео:', e);
-                    }
-                }
+    //        const ai = new GoogleGenAI({ apiKey });
+            // 1. Создаем объект клиента
+            const ai = new GoogleGenAI({ apiKey: "DUMMY_KEY" });
+            
+            // 2. ПРИНУДИТЕЛЬНО меняем адрес на ваш прокси
+            // @ts-ignore - игнорируем проверку типов, так как это "грязный хак" для гарантии
+            if (ai.transport) {
+                // @ts-ignore
+                ai.transport.baseUrl = PROXY_URL;
+            } else {
+                // @ts-ignore
+                ai.baseUrl = PROXY_URL;
+            }
 
-                if (videoRef.current) {
-                    videoRef.current.srcObject = stream;
-                }
+
+
+            inputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
+            outputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+            
+            setTranscription('Подключение к Gemini...');
+            
+            const connectConfig: LiveConnectConfig = {
+                responseModalities: [Modality.AUDIO],
+                speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Zephyr' } } },
+                systemInstruction: SYSTEM_PROMPT,
+                inputAudioTranscription: {},
+                outputAudioTranscription: {},
+            };
+            
+            if (sessionHandleRef.current) {
+                connectConfig.sessionResumption = { handle: sessionHandleRef.current };
+                console.log('Attempting to resume session with handle.');
+            } else {
+                console.log('Starting a new session.');
             }
             
-            const ai = new GoogleGenAI({ apiKey });
-
-            if (!inputAudioContextRef.current) {
-                 inputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
-            }
-            if (!outputAudioContextRef.current) {
-                outputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
-            }
-
-             // --- START: Proactive Greeting Logic ---
-            if (!isReconnecting) {
-                setTranscription('Генерация приветствия...');
-                console.log('Initiating greeting audio generation...');
-                
-                ai.models.generateContent({
-                    model: "gemini-2.5-flash-preview-tts",
-                    contents: [{ parts: [{ text: 'Привет, Жека. Как ты сегодня? Чем тебе помочь?' }] }],
-                    config: {
-                        responseModalities: [Modality.AUDIO],
-                        speechConfig: {
-                            voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Zephyr' } },
-                        },
-                    },
-                }).then(async (greetingResponse) => {
-                    const audioData = greetingResponse.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-                    if (audioData && outputAudioContextRef.current && outputAudioContextRef.current.state === 'running') {
-                        console.log("Greeting audio received, playing now.");
-                        const outputCtx = outputAudioContextRef.current;
-                        const startTime = outputCtx.currentTime;
-                        const audioBuffer = await decodeAudioData(decode(audioData), outputCtx, 24000, 1);
-                        const source = outputCtx.createBufferSource();
-                        source.buffer = audioBuffer;
-                        source.connect(outputCtx.destination);
-                        source.start(startTime);
-                        
-                        audioSourcesRef.current.add(source);
-                        source.addEventListener('ended', () => {
-                            audioSourcesRef.current.delete(source);
-                        });
-                    }
-                }).catch(e => {
-                    console.error("Failed to generate greeting audio in background:", e);
-                });
-            }
-            // --- END: Proactive Greeting Logic ---
-
-            if (!isReconnecting) {
-                setTranscription('Подключение к Gemini...');
-            }
-            
-            const connectOptions: LiveConnectParameters = {
+            sessionPromiseRef.current = ai.live.connect({
                 model: 'gemini-2.5-flash-native-audio-preview-09-2025',
-                config: {
-                    responseModalities: [Modality.AUDIO],
-                    speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Zephyr' } } },
-                    systemInstruction: SYSTEM_PROMPT,
-                    inputAudioTranscription: {},
-                    outputAudioTranscription: {},
-                },
+                config: connectConfig,
                 callbacks: {
                     onopen: () => {
                         console.log('Session opened.');
-                        retryAttemptsRef.current = 0; // ✅ Сброс при успешном подключении
                         setStatus('active');
-                        setTranscription('Сессия активна. Ожидаю вашего голоса...');
+                        setTranscription('Сессия активна. Жду собеседника...');
                         if ('vibrate' in navigator) navigator.vibrate(100);
 
-                        // Запускаем таймер, только если он еще не запущен
-                        if (!timerIntervalRef.current) {
-                            setSessionTime(0);
-                            timerIntervalRef.current = window.setInterval(() => {
-                                setSessionTime(prevTime => prevTime + 1);
-                            }, 1000);
-                        }
-
-                        const source = inputAudioContextRef.current!.createMediaStreamSource(mediaStreamRef.current!);
-                        mediaStreamSourceRef.current = source;
+                        const source = inputAudioContextRef.current!.createMediaStreamSource(stream);
                         const processor = inputAudioContextRef.current!.createScriptProcessor(4096, 1, 1);
                         scriptProcessorRef.current = processor;
 
@@ -449,6 +347,14 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>, onApiK
                             sessionHandleRef.current = message.sessionResumptionUpdate.newHandle;
                         }
 
+                        const serverContent = message.serverContent as any;
+                        if (serverContent?.goAway) {
+                            console.warn(`Server is closing the connection (GoAway). Time left: ${serverContent.goAway.timeLeft}s. Reconnecting...`);
+                            if (sessionRef.current && typeof sessionRef.current.close === 'function') {
+                                sessionRef.current.close();
+                            }
+                        }
+
                         if (message.serverContent?.outputTranscription?.text) {
                             setTranscription(prev => prev + message.serverContent.outputTranscription.text);
                         }
@@ -470,6 +376,10 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>, onApiK
                             source.buffer = audioBuffer;
                             source.connect(outputCtx.destination);
                             
+                            source.addEventListener('ended', () => {
+                                audioSourcesRef.current.delete(source);
+                            });
+
                             source.start(nextAudioStartTimeRef.current);
                             nextAudioStartTimeRef.current += audioBuffer.duration;
                             audioSourcesRef.current.add(source);
@@ -482,26 +392,30 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>, onApiK
                         }
                     },
                     onerror: (e) => {
+                        console.error('Session error:', e);
                         const errorEvent = e as ErrorEvent;
-                        console.error('🔴 ОШИБКА СЕССИИ:', {
-                            message: errorEvent.message,
-                            error: errorEvent.error,
-                            timestamp: new Date().toISOString(),
-                            navigatorOnline: navigator.onLine,
-                            sessionExists: !!sessionRef.current,
-                            mediaStreamActive: mediaStreamRef.current?.active,
-                            retryAttempt: retryAttemptsRef.current
-                        });
+                        let msg = errorEvent.message || "Произошла неизвестная ошибка.";
                         
-                        // Для API key errors
-                        if (errorEvent.message?.includes('API key')) {
-                            const msg = 'Ваш API-ключ недействителен. Пожалуйста, введите новый ключ в настройках (значок ⚙️).';
-                            onApiKeyError();
-                            isIntentionalStopRef.current = true;
+                        if (msg.includes('API key not valid')) {
+                            msg = 'Ошибка сервера авторизации. Пожалуйста, сообщите разработчику.';
+                            isIntentionalStopRef.current = true; // This is fatal
                             setErrorMessage(msg);
                             setStatus('error');
                             cleanupSession(true);
+                            return;
                         }
+
+                        if (msg.toLowerCase().includes('network error')) {
+                            msg = 'Сетевая ошибка. Проверьте интернет и отключите блокировщики рекламы.';
+                        }
+
+                        if (sessionHandleRef.current) {
+                            console.warn("Error with session handle, clearing it for reconnection attempt.");
+                            sessionHandleRef.current = null;
+                        }
+                        
+                        setErrorMessage(msg);
+                        setStatus('error');
                     },
                     onclose: () => {
                         console.log('Session closed.');
@@ -510,35 +424,12 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>, onApiK
                             return;
                         }
                         
+                        console.log('Unexpected closure. Attempting to reconnect...');
                         cleanupSession(false);
-
-                        if (retryAttemptsRef.current < MAX_RETRIES) {
-                            // Exponential: 1s → 2s → 4s → 8s → 16s
-                            const baseDelay = Math.min(1000 * Math.pow(2, retryAttemptsRef.current), 30000);
-                            // Jitter: +0-3000ms (предотвращает "thundering herd")
-                            const delay = baseDelay + Math.floor(Math.random() * 3000);
-                            
-                            console.log(`Unexpected closure. Attempting to reconnect in ${delay}ms... (Attempt ${retryAttemptsRef.current + 1})`);
-                            
-                            retryAttemptsRef.current++;
-                            setTimeout(() => startSession(true), delay);
-                        } else {
-                            console.error(`Max retries (${MAX_RETRIES}) reached. Stopping reconnection attempts.`);
-                            setStatus('error');
-                            setErrorMessage('Не удалось восстановить связь. Проверьте подключение к интернету.');
-                        }
+                        setTimeout(() => startSession(), 1000);
                     },
                 }
-            };
-            
-            if (sessionHandleRef.current) {
-                (connectOptions as any).sessionResumption = { handle: sessionHandleRef.current };
-                console.log('Attempting to resume session with handle.');
-            } else {
-                console.log('Starting a new session.');
-            }
-            
-            sessionPromiseRef.current = ai.live.connect(connectOptions);
+            });
             sessionRef.current = await sessionPromiseRef.current;
 
         } catch (err) {
@@ -546,9 +437,6 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>, onApiK
             let message = err instanceof Error ? err.message : String(err);
             if (message.toLowerCase().includes('network')) {
                 message = 'Сетевая ошибка. Проверьте интернет и отключите блокировщики рекламы.';
-            } else if (message.includes('API key not valid')) {
-                 message = 'Ваш API-ключ недействителен. Пожалуйста, введите новый ключ в настройках.';
-                 onApiKeyError();
             } else {
                  message = `Не удалось запустить сессию: ${message}`;
             }
@@ -556,82 +444,7 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>, onApiK
             setStatus('error');
             cleanupSession(true);
         }
-    }, [status, cleanupSession, videoRef, onApiKeyError]);
-    
-    // This effect handles network online/offline state changes
-    useEffect(() => {
-        const handleOnline = () => {
-            console.log('✅ Сеть восстановлена');
-            if (status === 'error' || status === 'idle') {
-                console.log('Attempting to reconnect after network came back online...');
-                retryAttemptsRef.current = 0; // Сбросить попытки
-                startSession(true);
-            }
-        };
-        
-        const handleOffline = () => {
-            console.log('❌ Сеть пропала');
-            setErrorMessage('Потеряно соединение с интернетом');
-            setStatus('error');
-            isIntentionalStopRef.current = true; // Предотвратить бесполезные retry
-            cleanupSession(false);
-        };
-        
-        window.addEventListener('online', handleOnline);
-        window.addEventListener('offline', handleOffline);
-        
-        return () => {
-            window.removeEventListener('online', handleOnline);
-            window.removeEventListener('offline', handleOffline);
-        };
-    }, [status, startSession, cleanupSession]);
+    }, [status, cleanupSession, videoRef]);
 
-    const toggleFlashlight = useCallback(async () => {
-        if (videoTrackRef.current && cameraCapabilities?.torch) {
-            try {
-                const nextFlashlightState = !isFlashlightOn;
-                // Fix: Cast constraint to any to allow non-standard 'torch' property.
-                await videoTrackRef.current.applyConstraints({ advanced: [{ torch: nextFlashlightState } as any] });
-                setIsFlashlightOn(nextFlashlightState);
-            } catch (e) {
-                console.error("Не удалось переключить фонарик", e);
-            }
-        }
-    }, [isFlashlightOn, cameraCapabilities]);
-
-    const changeZoom = useCallback(async (direction: 'in' | 'out') => {
-        if (videoTrackRef.current && cameraCapabilities?.zoom) {
-            const { minZoom, maxZoom, stepZoom } = cameraCapabilities;
-            let newZoom;
-            if (direction === 'in') {
-                newZoom = Math.min(maxZoom, currentZoom + stepZoom);
-            } else {
-                newZoom = Math.max(minZoom, currentZoom - stepZoom);
-            }
-
-            if (newZoom !== currentZoom) {
-                try {
-                    // Fix: Cast constraint to any to allow non-standard 'zoom' property.
-                    await videoTrackRef.current.applyConstraints({ advanced: [{ zoom: newZoom } as any] });
-                    setCurrentZoom(newZoom);
-                } catch (e) {
-                    console.error("Не удалось изменить зум", e);
-                }
-            }
-        }
-    }, [cameraCapabilities, currentZoom]);
-
-    return { 
-        status, 
-        startSession, 
-        stopSession, 
-        transcription, 
-        errorMessage, 
-        sessionTime,
-        cameraCapabilities,
-        isFlashlightOn,
-        currentZoom,
-        toggleFlashlight,
-        changeZoom
-    };
+    return { status, startSession, stopSession, transcription, errorMessage, sessionTime };
 };

@@ -1,11 +1,10 @@
-
 import React, { useRef, useState, useEffect } from 'react';
 import { useVisionAssistant } from './hooks/useVisionAssistant';
 import { ActionButton } from './components/ActionButton';
 import { StatusDisplay } from './components/StatusDisplay';
 import { SettingsScreen } from './components/SettingsScreen';
-import { CameraControls } from './components/CameraControls';
 import { FullscreenButton } from './components/FullscreenButton';
+import { ModeToggleButton } from './components/ModeToggleButton';
 
 interface GearIconProps {
     showNotification?: boolean;
@@ -25,24 +24,25 @@ const GearIcon: React.FC<GearIconProps> = ({ showNotification = false }) => (
     </div>
 );
 
+const AudioModeIcon: React.FC = () => (
+    <svg xmlns="http://www.w3.org/2000/svg" className="h-24 w-24 text-high-contrast-accent" viewBox="0 0 24 24" fill="currentColor">
+        <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.49 6-3.31 6-6.72h-1.7z"/>
+    </svg>
+);
+
 
 const App: React.FC = () => {
     const videoRef = useRef<HTMLVideoElement>(null);
     const [apiKeySelected, setApiKeySelected] = useState(false);
     const [showSettings, setShowSettings] = useState(false);
     const [isFullscreen, setIsFullscreen] = useState(false);
+    const [mode, setMode] = useState<'video' | 'audio'>('video');
 
     const checkApiKey = () => {
         const key = localStorage.getItem('gemini-api-key');
         const hasKey = !!key && key.length > 0;
         setApiKeySelected(hasKey);
         return hasKey;
-    };
-
-    const handleApiKeyError = () => {
-        localStorage.removeItem('gemini-api-key');
-        setApiKeySelected(false);
-        setShowSettings(true);
     };
 
     const { 
@@ -52,12 +52,7 @@ const App: React.FC = () => {
         transcription, 
         errorMessage,
         sessionTime,
-        cameraCapabilities,
-        isFlashlightOn,
-        currentZoom,
-        toggleFlashlight,
-        changeZoom,
-    } = useVisionAssistant(videoRef, handleApiKeyError);
+    } = useVisionAssistant(videoRef);
 
     useEffect(() => {
         checkApiKey();
@@ -84,11 +79,7 @@ const App: React.FC = () => {
         if (status === 'active') {
             stopSession();
         } else if (status === 'idle' || status === 'error') {
-            if (checkApiKey()) {
-                startSession();
-            } else {
-                setShowSettings(true);
-            }
+            startSession();
         }
     };
 
@@ -128,7 +119,15 @@ const App: React.FC = () => {
 
             {/* Header - Always on top */}
             <header className="w-full text-center py-2 relative flex-shrink-0 flex justify-between items-center px-4">
-                <FullscreenButton isFullscreen={isFullscreen} onClick={toggleFullscreen} />
+                 <div className="flex items-center gap-4">
+                    <FullscreenButton isFullscreen={isFullscreen} onClick={toggleFullscreen} />
+                    {status === 'active' && (
+                        <ModeToggleButton 
+                            mode={mode} 
+                            onToggle={() => setMode(m => m === 'video' ? 'audio' : 'video')} 
+                        />
+                    )}
+                </div>
                 <h1 className="text-2xl md:text-3xl font-bold text-high-contrast-accent">Ассистент</h1>
                 <button
                     onClick={() => setShowSettings(true)}
@@ -143,22 +142,19 @@ const App: React.FC = () => {
             <div className="flex-grow flex flex-col landscape:flex-row gap-2 overflow-hidden">
                 
                 {/* Video Container */}
-                <div className="relative h-[45%] w-full flex items-center justify-center overflow-hidden landscape:w-[55%] landscape:h-full">
+                <div className="relative h-[45%] w-full flex items-center justify-center overflow-hidden landscape:w-[55%] landscape:h-full bg-black">
                     <video
                         ref={videoRef}
                         autoPlay
                         playsInline
                         muted
-                        className="max-w-full max-h-full object-contain"
+                        className={`max-w-full max-h-full object-contain transition-opacity duration-500 ${mode === 'video' ? 'opacity-100' : 'opacity-0'}`}
                     ></video>
-                    {status === 'active' && cameraCapabilities && (
-                        <CameraControls
-                            capabilities={cameraCapabilities}
-                            isFlashlightOn={isFlashlightOn}
-                            currentZoom={currentZoom}
-                            onToggleFlashlight={toggleFlashlight}
-                            onChangeZoom={changeZoom}
-                        />
+                     {mode === 'audio' && (
+                        <div className="absolute inset-0 flex flex-col items-center justify-center text-high-contrast-accent animate-pulse">
+                            <AudioModeIcon />
+                            <p className="mt-4 text-xl font-semibold">Режим "Только аудио"</p>
+                        </div>
                     )}
                 </div>
                 
@@ -169,7 +165,7 @@ const App: React.FC = () => {
                             status={status}
                             onClick={handleAction}
                         />
-                        {(status === 'active' || status === 'connecting' || status === 'reconnecting') && (
+                        {(status === 'active' || status === 'connecting') && (
                             <div className="mt-2 text-center">
                                 <p className="text-lg text-high-contrast-accent font-mono" aria-live="off">
                                     {formatTime(sessionTime)}
