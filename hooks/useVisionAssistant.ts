@@ -1,3 +1,4 @@
+
 import { useState, useRef, useCallback, RefObject } from 'react';
 import { GoogleGenAI, LiveServerMessage, Modality, Blob, LiveConnectConfig } from '@google/genai';
 import { encode, decode, decodeAudioData } from '../services/audioUtils';
@@ -12,8 +13,7 @@ export interface CameraCapabilities {
 type Status = 'idle' | 'connecting' | 'active' | 'error';
 const FRAME_RATE = 1; // кадров в секунду
 const TARGET_RESOLUTION = 768; // Уменьшено разрешение для стабильности
-const JPEG_QUALITY = 0.9; // Уменьшено качество для уменьшения размера файла
-const PROXY_URL = "wss://ws.kazbon.kz"; //"wss://ws.kazbon.kz"; https://gemini-proxy.kirill-gbi.workers.dev
+const JPEG_QUALITY = 0.8; // Уменьшено качество для уменьшения размера файла
 
 const SYSTEM_PROMPT = `Ты — персональный видео-ассистент для слабовидящих людей с 30-летним опытом помощи. Тебя зовут Аня, твой создатель Кирилл. Ты очень веселая и любишь шутить с собеседниками. 
 ВСЕГДА отвечай на русском языке.
@@ -250,22 +250,10 @@ export const useVisionAssistant = (videoRef: RefObject<HTMLVideoElement>) => {
                 videoRef.current.srcObject = stream;
             }
 
-    //        const ai = new GoogleGenAI({ apiKey });
-            // 1. Создаем объект клиента
+            // Создаем клиент с DUMMY_KEY.
+            // Патч proxy-patch.ts перехватит подключение и перенаправит его на ws.kazbon.kz
             const ai = new GoogleGenAI({ apiKey: "DUMMY_KEY" });
             
-            // 2. ПРИНУДИТЕЛЬНО меняем адрес на ваш прокси
-            // @ts-ignore - игнорируем проверку типов, так как это "грязный хак" для гарантии
-            if (ai.transport) {
-                // @ts-ignore
-                ai.transport.baseUrl = PROXY_URL;
-            } else {
-                // @ts-ignore
-                ai.baseUrl = PROXY_URL;
-            }
-
-
-
             inputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
             outputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
             
